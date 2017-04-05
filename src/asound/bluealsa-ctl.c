@@ -520,6 +520,14 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 	return 0;
 }
 
+static int bluealsa_read_event(snd_ctl_ext_t *ext, snd_ctl_elem_id_t *id, unsigned int *event_mask) {
+	(void)ext;
+	(void)id;
+	(void)event_mask;
+	/* notifications are not implemented yet */
+	return -EAGAIN;
+}
+
 static const snd_ctl_ext_callback_t bluealsa_snd_ctl_ext_callback = {
 	.close = bluealsa_close,
 	.elem_count = bluealsa_elem_count,
@@ -529,6 +537,7 @@ static const snd_ctl_ext_callback_t bluealsa_snd_ctl_ext_callback = {
 	.get_integer_info = bluealsa_get_integer_info,
 	.read_integer = bluealsa_read_integer,
 	.write_integer = bluealsa_write_integer,
+	.read_event = bluealsa_read_event,
 };
 
 SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
@@ -582,7 +591,7 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 
 	ctl->ext.callback = &bluealsa_snd_ctl_ext_callback;
 	ctl->ext.private_data = ctl;
-	ctl->ext.poll_fd = -1;
+	ctl->ext.poll_fd = ctl->fd;
 
 	if ((ret = snd_ctl_ext_create(&ctl->ext, name, mode)) < 0)
 		goto fail;
