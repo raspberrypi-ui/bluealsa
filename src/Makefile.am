@@ -1,6 +1,10 @@
 # BlueALSA - Makefile.am
 # Copyright (c) 2016-2017 Arkadiusz Bokowy
 
+EXTRA_DIST = bluealsa.service
+bluealsa_data_DATA = bluealsa.service
+bluealsa_datadir = /lib/systemd/system
+
 bin_PROGRAMS = bluealsa
 SUBDIRS = asound
 

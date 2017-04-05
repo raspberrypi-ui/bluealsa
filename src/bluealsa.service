@@ -1,0 +1,12 @@
+[Unit]
+Description=BluezALSA proxy
+Requires=bluetooth.service
+After=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/bluealsa
+
+[Install]
+WantedBy=graphical.target
