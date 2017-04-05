@@ -1,0 +1,2 @@
+autoreconf --force --verbose --install
+
