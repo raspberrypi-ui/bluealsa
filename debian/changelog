@@ -1,3 +1,9 @@
+bluealsa (0.2) stretch; urgency=medium
+
+  * Merge in changes from bluealsa as of 28/06/17
+
+ -- Simon Long <simon@raspberrypi.org>  Wed, 28 Jun 2017 09:15:06 +0100
+
 bluealsa (0.1) unstable; urgency=low
 
   * Initial release

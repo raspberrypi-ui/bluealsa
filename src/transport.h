@@ -12,6 +12,7 @@
 #define BLUEALSA_TRANSPORT_H_
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -99,7 +100,7 @@ struct ba_transport {
 	pthread_t thread;
 
 	/* This field stores a file descriptor (socket) associated with the BlueZ
-	 * site of the transport. The role of this socket depends on the transport
+	 * side of the transport. The role of this socket depends on the transport
 	 * type - it can be either A2DP, RFCOMM or SCO link. */
 	int bt_fd;
 
@@ -180,7 +181,7 @@ void device_free(struct ba_device *d);
 
 struct ba_device *device_get(GHashTable *devices, const char *key);
 struct ba_device *device_lookup(GHashTable *devices, const char *key);
-gboolean device_remove(GHashTable *devices, const char *key);
+bool device_remove(GHashTable *devices, const char *key);
 
 struct ba_transport *transport_new(
 		struct ba_device *device,
@@ -206,7 +207,7 @@ void transport_free(struct ba_transport *t);
 
 struct ba_transport *transport_lookup(GHashTable *devices, const char *dbus_path);
 struct ba_transport *transport_lookup_pcm_client(GHashTable *devices, int client);
-gboolean transport_remove(GHashTable *devices, const char *dbus_path);
+bool transport_remove(GHashTable *devices, const char *dbus_path);
 
 unsigned int transport_get_channels(const struct ba_transport *t);
 unsigned int transport_get_sampling(const struct ba_transport *t);

@@ -149,6 +149,8 @@ void device_free(struct ba_device *d) {
 
 	g_hash_table_unref(d->transports);
 	free(d);
+
+	bluealsa_event();
 }
 
 struct ba_device *device_get(GHashTable *devices, const char *key) {
@@ -181,7 +183,7 @@ struct ba_device *device_lookup(GHashTable *devices, const char *key) {
 	return g_hash_table_lookup(devices, key);
 }
 
-gboolean device_remove(GHashTable *devices, const char *key) {
+bool device_remove(GHashTable *devices, const char *key) {
 	return g_hash_table_remove(devices, key);
 }
 
@@ -272,6 +274,7 @@ struct ba_transport *transport_new_a2dp(
 	t->a2dp.pcm.fd = -1;
 	t->a2dp.pcm.client = -1;
 
+	bluealsa_event();
 	return t;
 }
 
@@ -306,6 +309,7 @@ struct ba_transport *transport_new_rfcomm(
 
 	transport_set_state(t_sco, TRANSPORT_ACTIVE);
 
+	bluealsa_event();
 	return t;
 
 fail:
@@ -414,7 +418,7 @@ struct ba_transport *transport_lookup_pcm_client(GHashTable *devices, int client
 	return NULL;
 }
 
-gboolean transport_remove(GHashTable *devices, const char *dbus_path) {
+bool transport_remove(GHashTable *devices, const char *dbus_path) {
 
 	GHashTableIter iter;
 	struct ba_device *d;
@@ -425,11 +429,11 @@ gboolean transport_remove(GHashTable *devices, const char *dbus_path) {
 		if (g_hash_table_remove(d->transports, dbus_path)) {
 			if (g_hash_table_size(d->transports) == 0)
 				g_hash_table_iter_remove(&iter);
-			return TRUE;
+			return true;
 		}
 	}
 
-	return FALSE;
+	return false;
 }
 
 unsigned int transport_get_channels(const struct ba_transport *t) {

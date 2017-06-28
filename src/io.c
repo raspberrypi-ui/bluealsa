@@ -40,23 +40,6 @@
 #include "shared/rt.h"
 
 
-struct io_sync {
-
-	/* reference time point */
-	struct timespec ts0;
-	/* transfered frames since ts0 */
-	uint32_t frames;
-
-	/* time-stamp from the previous sync */
-	struct timespec ts;
-	/* delay in 1/10 of millisecond since ts */
-	uint16_t delay;
-
-	/* used sampling frequency */
-	uint16_t sampling;
-
-};
-
 /**
  * Wrapper for release callback, which can be used by pthread cleanup. */
 static void io_thread_release(struct ba_transport *t) {
@@ -247,53 +230,6 @@ static ssize_t io_thread_write_at_response(int fd, const char *msg) {
 	return io_thread_write_rfcomm(fd, buffer);
 }
 
-/**
- * Synchronize thread timing with the audio sampling frequency.
- *
- * Time synchronization relies on the frame counter being linear. This counter
- * should be initialized upon transfer start and resume. With the size of this
- * counter being 32 bits, it is possible to track up to ~24 hours of playback,
- * with the sampling rate of 48 kHz. If this is insufficient, one can switch
- * to 64 bits, which would be sufficient to play for 12 million years. */
-static int io_thread_time_sync(struct io_sync *io_sync, uint32_t frames) {
-
-	const uint16_t sampling = io_sync->sampling;
-	struct timespec ts_audio;
-	struct timespec ts_clock;
-	struct timespec ts;
-
-	/* calculate the playback duration of given frames */
-	unsigned int sec = frames / sampling;
-	unsigned int res = frames % sampling;
-	int duration = 1000000 * sec + 1000000 / sampling * res;
-
-	io_sync->frames += frames;
-	frames = io_sync->frames;
-
-	/* keep transfer 10ms ahead */
-	unsigned int overframes = sampling / 100;
-	frames = frames > overframes ? frames - overframes : 0;
-
-	ts_audio.tv_sec = frames / sampling;
-	ts_audio.tv_nsec = 1000000000 / sampling * (frames % sampling);
-
-	gettimestamp(&ts_clock);
-
-	/* Calculate delay since the last sync. Note, that we are not taking whole
-	 * seconds into account, because if the delay is greater than one second,
-	 * we are screwed anyway... */
-	difftimespec(&io_sync->ts, &ts_clock, &ts);
-	io_sync->delay = ts.tv_nsec / 100000;
-
-	/* maintain constant bit rate */
-	difftimespec(&io_sync->ts0, &ts_clock, &ts_clock);
-	if (difftimespec(&ts_clock, &ts_audio, &ts) > 0)
-		nanosleep(&ts, NULL);
-
-	gettimestamp(&io_sync->ts);
-	return duration;
-}
-
 void *io_thread_a2dp_sink_sbc(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
@@ -395,10 +331,12 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 		const rtp_header_t *rtp_header = (rtp_header_t *)in_buffer;
 		const rtp_payload_sbc_t *rtp_payload = (rtp_payload_sbc_t *)&rtp_header->csrc[rtp_header->cc];
 
+#if ENABLE_PAYLOADCHECK
 		if (rtp_header->paytype != 96) {
 			warn("Unsupported RTP payload type: %u", rtp_header->paytype);
 			continue;
 		}
+#endif
 
 		uint16_t _seq_number = ntohs(rtp_header->seq_number);
 		if (++seq_number != _seq_number) {
@@ -464,6 +402,7 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 
 	const size_t sbc_codesize = sbc_get_codesize(&sbc);
 	const size_t sbc_frame_len = sbc_get_frame_length(&sbc);
+	const unsigned int sbc_frame_duration = sbc_get_frame_duration(&sbc);
 	const unsigned int channels = transport_get_channels(t);
 
 	/* Writing MTU should be big enough to contain RTP header, SBC payload
@@ -511,13 +450,10 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 	int16_t *in_buffer_head = in_buffer;
 	size_t in_samples = in_buffer_size / sizeof(int16_t);
 
+	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
 		{ -1, POLLIN, 0 },
-	};
-
-	struct io_sync io_sync = {
-		.sampling = transport_get_sampling(t),
 	};
 
 	debug("Starting IO loop: %s",
@@ -539,7 +475,7 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 			/* dispatch incoming event */
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
-			io_sync.frames = 0;
+			asrs.frames = 0;
 			continue;
 		}
 
@@ -556,10 +492,8 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 		 * there might be no data for a long time - until client starts playback.
 		 * In order to correctly calculate time drift, the zero time point has to
 		 * be obtained after the stream has started. */
-		if (io_sync.frames == 0) {
-			gettimestamp(&io_sync.ts);
-			io_sync.ts0 = io_sync.ts;
-		}
+		if (asrs.frames == 0)
+			asrsync_init(asrs, transport_get_sampling(t));
 
 		if (!config.a2dp_volume)
 			/* scale volume or mute audio signal */
@@ -616,8 +550,9 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 
 			/* keep data transfer at a constant bit rate, also
 			 * get a timestamp for the next RTP frame */
-			timestamp += io_thread_time_sync(&io_sync, pcm_frames);
-			t->delay = io_sync.delay;
+			asrsync_sync(&asrs, pcm_frames);
+			timestamp += sbc_frame_duration;
+			t->delay = asrs.ts_busy.tv_nsec / 100000;
 
 		}
 
@@ -759,10 +694,12 @@ void *io_thread_a2dp_sink_aac(void *arg) {
 		uint8_t *rtp_latm = (uint8_t *)&rtp_header->csrc[rtp_header->cc];
 		size_t rtp_latm_len = len - ((void *)rtp_latm - (void *)rtp_header);
 
+#if ENABLE_PAYLOADCHECK
 		if (rtp_header->paytype != 96) {
 			warn("Unsupported RTP payload type: %u", rtp_header->paytype);
 			continue;
 		}
+#endif
 
 		uint16_t _seq_number = ntohs(rtp_header->seq_number);
 		if (++seq_number != _seq_number) {
@@ -950,13 +887,10 @@ void *io_thread_a2dp_source_aac(void *arg) {
 	size_t in_samples = in_buffer_size / in_buffer_element_size;
 	in_buffer_head = in_buffer;
 
+	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
 		{ -1, POLLIN, 0 },
-	};
-
-	struct io_sync io_sync = {
-		.sampling = samplerate,
 	};
 
 	debug("Starting IO loop: %s",
@@ -978,7 +912,7 @@ void *io_thread_a2dp_source_aac(void *arg) {
 			/* dispatch incoming event */
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
-			io_sync.frames = 0;
+			asrs.frames = 0;
 			continue;
 		}
 
@@ -991,10 +925,8 @@ void *io_thread_a2dp_source_aac(void *arg) {
 
 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
-		if (io_sync.frames == 0) {
-			gettimestamp(&io_sync.ts);
-			io_sync.ts0 = io_sync.ts;
-		}
+		if (asrs.frames == 0)
+			asrsync_init(asrs, samplerate);
 
 		if (!config.a2dp_volume)
 			/* scale volume or mute audio signal */
@@ -1064,8 +996,10 @@ void *io_thread_a2dp_source_aac(void *arg) {
 
 			/* keep data transfer at a constant bit rate, also
 			 * get a timestamp for the next RTP frame */
-			timestamp += io_thread_time_sync(&io_sync, out_args.numInSamples / channels);
-			t->delay = io_sync.delay;
+			unsigned int frames = out_args.numInSamples / channels;
+			asrsync_sync(&asrs, frames);
+			timestamp += frames * 10000 / samplerate;
+			t->delay = asrs.ts_busy.tv_nsec / 100000;
 
 		}
 
@@ -1137,7 +1071,7 @@ void *io_thread_rfcomm(void *arg) {
 			if (spk_gain != t->rfcomm.sco->sco.spk_gain) {
 				spk_gain = t->rfcomm.sco->sco.spk_gain;
 				debug("Setting speaker gain: %d", spk_gain);
-				sprintf(buffer, "+VGS=%d", mic_gain);
+				sprintf(buffer, "+VGS=%d", spk_gain);
 				io_thread_write_at_response(pfds[1].fd, buffer);
 			}
 
@@ -1172,10 +1106,14 @@ void *io_thread_rfcomm(void *arg) {
 		}
 		else if (strcmp(command, "+CKPD") == 0 && atoi(value) == 200) {
 		}
-		else if (strcmp(command, "+VGM") == 0)
+		else if (strcmp(command, "+VGM") == 0) {
 			t->rfcomm.sco->sco.mic_gain = mic_gain = atoi(value);
-		else if (strcmp(command, "+VGS") == 0)
+			bluealsa_event();
+		}
+		else if (strcmp(command, "+VGS") == 0) {
 			t->rfcomm.sco->sco.spk_gain = spk_gain = atoi(value);
+			bluealsa_event();
+		}
 		else if (strcmp(command, "+IPHONEACCEV") == 0) {
 
 			char *ptr = value;
@@ -1187,6 +1125,7 @@ void *io_thread_rfcomm(void *arg) {
 				case '1':
 					if (ptr != NULL)
 						t->device->xapl.accev_battery = atoi(strsep(&ptr, ","));
+						bluealsa_event();
 					break;
 				case '2':
 					if (ptr != NULL)
@@ -1244,14 +1183,11 @@ void *io_thread_sco(void *arg) {
 		goto fail;
 	}
 
+	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
 		{ -1, POLLIN, 0 },
 		{ -1, POLLIN, 0 },
-	};
-
-	struct io_sync io_sync = {
-		.sampling = transport_get_sampling(t),
 	};
 
 	debug("Starting IO loop: %s",
@@ -1282,7 +1218,7 @@ void *io_thread_sco(void *arg) {
 			 * transfered even though we are not reading from it! */
 			if (t->sco.spk_pcm.fd == -1 && t->sco.mic_pcm.fd == -1) {
 				transport_release_bt_sco(t);
-				io_sync.frames = 0;
+				asrs.frames = 0;
 			}
 			else
 				transport_acquire_bt_sco(t);
@@ -1290,10 +1226,8 @@ void *io_thread_sco(void *arg) {
 			continue;
 		}
 
-		if (io_sync.frames == 0) {
-			gettimestamp(&io_sync.ts);
-			io_sync.ts0 = io_sync.ts;
-		}
+		if (asrs.frames == 0)
+			asrsync_init(asrs, transport_get_sampling(t));
 
 		if (pfds[1].revents & POLLIN) {
 
@@ -1303,6 +1237,9 @@ void *io_thread_sco(void *arg) {
 				debug("SCO read error: %s", strerror(errno));
 				continue;
 			}
+
+			if (t->sco.mic_muted)
+				snd_pcm_scale_s16le(buffer, len / sizeof(int16_t), 1, 0, 0);
 
 			write(t->sco.mic_pcm.fd, buffer, len);
 		}
@@ -1318,12 +1255,15 @@ void *io_thread_sco(void *arg) {
 				continue;
 			}
 
+			if (t->sco.spk_muted)
+				snd_pcm_scale_s16le(buffer, samples, 1, 0, 0);
+
 			write(t->bt_fd, buffer, samples * sizeof(int16_t));
 		}
 
 		/* keep data transfer at a constant bit rate */
-		io_thread_time_sync(&io_sync, 48 / 2);
-		t->delay = io_sync.delay;
+		asrsync_sync(&asrs, 48 / 2);
+		t->delay = asrs.ts_busy.tv_nsec / 100000;
 
 	}
 

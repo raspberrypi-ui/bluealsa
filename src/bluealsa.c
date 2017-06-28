@@ -11,6 +11,7 @@
 #include "bluealsa.h"
 
 #include <grp.h>
+#include <sys/eventfd.h>
 
 #include "transport.h"
 
@@ -19,13 +20,13 @@
 struct ba_config config = {
 
 	/* by default all profiles are enabled */
-	.enable_a2dp = TRUE,
-	.enable_hsp = TRUE,
-	.enable_hfp = TRUE,
+	.enable_a2dp = true,
+	.enable_hsp = true,
+	.enable_hfp = true,
 
 	/* initialization flags */
-	.ctl_socket_created = FALSE,
-	.ctl_thread_created = FALSE,
+	.ctl.socket_created = false,
+	.ctl.thread_created = false,
 
 	/* omit chown if audio group is not defined */
 	.gid_audio = -1,
@@ -34,16 +35,16 @@ struct ba_config config = {
 	/* There are two issues with the afterburner: a) it uses a LOT of power,
 	 * b) it generates larger payload (see VBR comment). These two reasons
 	 * are good enough to not enable afterburner by default. */
-	.aac_afterburner = FALSE,
+	.aac_afterburner = false,
 	/* Low bitrate for VBR mode should ensure, that the RTP payload will not
 	 * exceed our writing MTU. It is important not to do so, because the code
 	 * responsible for fragmentation seems not to work as expected. */
 	.aac_vbr_mode = 3,
 #endif
 
-	.a2dp_force_mono = FALSE,
-	.a2dp_force_44100 = FALSE,
-	.a2dp_volume = FALSE,
+	.a2dp_force_mono = false,
+	.a2dp_force_44100 = false,
+	.a2dp_volume = false,
 
 };
 
@@ -70,4 +71,8 @@ void bluealsa_config_free(void) {
 	pthread_mutex_destroy(&config.devices_mutex);
 	g_hash_table_unref(config.devices);
 	g_hash_table_unref(config.dbus_objects);
+}
+
+void bluealsa_event() {
+	eventfd_write(config.ctl.pfds[CTL_IDX_EVT].fd, 1);
 }

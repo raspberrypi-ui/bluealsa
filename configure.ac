@@ -2,7 +2,7 @@
 # Copyright (c) 2016-2017 Arkadiusz Bokowy
 
 AC_PREREQ([2.59])
-AC_INIT([bluez-alsa], [1.1.0], [arkadiusz.bokowy@gmail.com])
+AC_INIT([bluez-alsa], [1.2.0], [arkadiusz.bokowy@gmail.com])
 AM_INIT_AUTOMAKE([foreign subdir-objects -Wall -Werror])
 
 AC_CONFIG_HEADERS([config.h])
@@ -36,6 +36,8 @@ AC_CHECK_LIB([pthread], [pthread_create],
 	[], [AC_MSG_ERROR([pthread library not found])])
 AC_CHECK_HEADERS([ortp/rtp.h],
 	[], [AC_MSG_ERROR([ortp/rtp.h header not found])])
+AC_SEARCH_LIBS([clock_gettime], [rt],
+	[], [AC_MSG_ERROR([unable to find clock_gettime() function])])
 AC_SEARCH_LIBS([pow], [m],
 	[], [AC_MSG_ERROR([unable to find pow() function])])
 
@@ -55,17 +57,30 @@ AM_COND_IF([ENABLE_AAC], [
 	AC_DEFINE([ENABLE_AAC], [1], [Define to 1 if AAC is enabled.])
 ])
 
+AC_ARG_ENABLE([payloadcheck],
+	[AS_HELP_STRING([--disable-payloadcheck], [disable RTP payload type check (workaround for a PulseAudio bug)])])
+AM_CONDITIONAL([ENABLE_PAYLOADCHECK], [test "x$enable_payloadcheck" != "xno"])
+AM_COND_IF([ENABLE_PAYLOADCHECK], [
+	AC_DEFINE([ENABLE_PAYLOADCHECK], [1], [Define to 1 if PAYLOADCHECK is enabled.])
+])
+
 AC_ARG_ENABLE([aplay],
-	[AS_HELP_STRING([--disable-aplay], [disable building of aplay tool])])
+	[AS_HELP_STRING([--disable-aplay], [disable building of bluealsa-aplay tool])])
 AM_CONDITIONAL([ENABLE_APLAY], [test "x$enable_aplay" != "xno"])
 
 AC_ARG_ENABLE([hcitop],
-	[AS_HELP_STRING([--disable-hcitop], [disable building of hcitop tool])])
-AM_CONDITIONAL([ENABLE_HCITOP], [test "x$enable_hcitop" != "xno"])
+	[AS_HELP_STRING([--enable-hcitop], [enable building of hcitop tool])])
+AM_CONDITIONAL([ENABLE_HCITOP], [test "x$enable_hcitop" = "xyes"])
 AM_COND_IF([ENABLE_HCITOP], [
 	PKG_CHECK_MODULES([LIBBSD], [libbsd])
 	PKG_CHECK_MODULES([NCURSES], [ncurses])
 ])
+
+# Since it is not possible to specify custom ALSA plugin directory, BlueALSA
+# PCM plugin has to be installed prior to this test.
+AC_ARG_ENABLE([pcm-test],
+	[AS_HELP_STRING([--enable-pcm-test], [enable PCM plugin test])])
+AM_CONDITIONAL([ENABLE_PCM_TEST], [test "x$enable_pcm_test" = "xyes"])
 
 AC_ARG_WITH([alsaplugindir],
 	AS_HELP_STRING([--with-alsaplugindir=dir], [path where ALSA plugin files are stored]),

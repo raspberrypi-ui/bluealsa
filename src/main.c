@@ -8,6 +8,10 @@
  *
  */
 
+#if HAVE_CONFIG_H
+# include "config.h"
+#endif
+
 #include <errno.h>
 #include <getopt.h>
 #include <signal.h>
@@ -43,9 +47,10 @@ static void main_loop_stop(int sig) {
 int main(int argc, char **argv) {
 
 	int opt;
-	const char *opts = "hi:";
+	const char *opts = "hVi:";
 	const struct option longopts[] = {
 		{ "help", no_argument, NULL, 'h' },
+		{ "version", no_argument, NULL, 'V' },
 		{ "device", required_argument, NULL, 'i' },
 		{ "disable-a2dp", no_argument, NULL, 1 },
 		{ "disable-hsp", no_argument, NULL, 2 },
@@ -93,7 +98,9 @@ int main(int argc, char **argv) {
 
 		case 'h' /* --help */ :
 			printf("usage: %s [OPTION]...\n\n"
+					"options:\n"
 					"  -h, --help\t\tprint this help and exit\n"
+					"  -V, --version\t\tprint version and exit\n"
 					"  -i, --device=hciX\tHCI device to use\n"
 					"  --disable-a2dp\tdisable A2DP support\n"
 					"  --disable-hsp\t\tdisable HSP support\n"
@@ -106,6 +113,10 @@ int main(int argc, char **argv) {
 					"  --aac-vbr-mode=NB\tset VBR mode to NB\n"
 #endif
 					, argv[0]);
+			return EXIT_SUCCESS;
+
+		case 'V' /* --version */ :
+			printf("%s\n", PACKAGE_VERSION);
 			return EXIT_SUCCESS;
 
 		case 'i' /* --device=HCI */ : {
@@ -140,18 +151,18 @@ int main(int argc, char **argv) {
 		}
 
 		case 1 /* --disable-a2dp */ :
-			config.enable_a2dp = FALSE;
+			config.enable_a2dp = false;
 			break;
 		case 2 /* --disable-hsp */ :
-			config.enable_hsp = FALSE;
+			config.enable_hsp = false;
 			break;
 		case 3 /* --disable-hfp */ :
-			config.enable_hfp = FALSE;
+			config.enable_hfp = false;
 			break;
 
 #if ENABLE_AAC
 		case 4 /* --aac-afterburner */ :
-			config.aac_afterburner = TRUE;
+			config.aac_afterburner = true;
 			break;
 		case 5 /* --aac-vbr-mode=NB */ :
 			config.aac_vbr_mode = atoi(optarg);
@@ -163,13 +174,13 @@ int main(int argc, char **argv) {
 #endif
 
 		case 6 /* --a2dp-force-mono */ :
-			config.a2dp_force_mono = TRUE;
+			config.a2dp_force_mono = true;
 			break;
 		case 7 /* --a2dp-force-audio-cd */ :
-			config.a2dp_force_44100 = TRUE;
+			config.a2dp_force_44100 = true;
 			break;
 		case 8 /* --a2dp-volume */ :
-			config.a2dp_volume = TRUE;
+			config.a2dp_volume = true;
 			break;
 
 		default:
