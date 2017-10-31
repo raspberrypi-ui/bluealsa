@@ -2,6 +2,7 @@
 # Copyright (c) 2016-2017 Arkadiusz Bokowy
 
 TESTS = \
+	test-at \
 	test-io \
 	test-utils
 
@@ -10,6 +11,7 @@ TESTS += test-pcm
 endif
 
 check_PROGRAMS = \
+	test-at \
 	test-io \
 	test-pcm \
 	test-server \
@@ -22,6 +24,7 @@ AM_CFLAGS = \
 	@GLIB2_CFLAGS@ \
 	@GIO2_CFLAGS@ \
 	@AAC_CFLAGS@ \
+	@APTX_CFLAGS@ \
 	@SBC_CFLAGS@
 
 LDADD = \
@@ -30,4 +33,5 @@ LDADD = \
 	@GLIB2_LIBS@ \
 	@GIO2_LIBS@ \
 	@AAC_LIBS@ \
+	@APTX_LIBS@ \
 	@SBC_LIBS@

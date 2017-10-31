@@ -1,6 +1,6 @@
 /*
  * BlueALSA - transport.h
- * Copyright (c) 2016 Arkadiusz Bokowy
+ * Copyright (c) 2016-2017 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -21,6 +21,7 @@
 #include <glib.h>
 
 #include "bluez.h"
+#include "hfp.h"
 
 enum ba_transport_type {
 	TRANSPORT_TYPE_A2DP,
@@ -33,7 +34,8 @@ enum ba_transport_state {
 	TRANSPORT_PENDING,
 	TRANSPORT_ACTIVE,
 	TRANSPORT_PAUSED,
-	TRANSPORT_ABORTED,
+	/* transport is in the eviction state */
+	TRANSPORT_LIMBO,
 };
 
 struct ba_device {
@@ -45,6 +47,12 @@ struct ba_device {
 	/* human-readable Bluetooth device name */
 	char name[HCI_MAX_NAME_LENGTH];
 
+	/* adjusted (in the range 0-100) battery level */
+	struct {
+		bool enabled;
+		uint8_t level;
+	} battery;
+
 	/* Apple's extension used with HFP profile */
 	struct {
 
@@ -53,8 +61,6 @@ struct ba_device {
 		uint16_t version;
 		uint8_t features;
 
-		/* headset battery level in range [0, 9] */
-		uint8_t accev_battery;
 		/* determine whether headset is docked */
 		uint8_t accev_docked;
 
@@ -91,9 +97,10 @@ struct ba_transport {
 	char *dbus_owner;
 	char *dbus_path;
 
-	/* selected profile and audio codec */
+	/* Selected profile and audio codec. For A2DP vendor codecs the upper byte
+	 * of the codec field contains the lowest byte of the vendor ID. */
 	enum bluetooth_profile profile;
-	uint8_t codec;
+	uint16_t codec;
 
 	/* IO thread - actual transport layer */
 	enum ba_transport_state state;
@@ -144,6 +151,11 @@ struct ba_transport {
 			/* associated SCO transport */
 			struct ba_transport *sco;
 
+			/* AG/HF supported features bitmask */
+			uint32_t hfp_features;
+			/* received AG indicator values */
+			unsigned char hfp_inds[__HFP_IND_MAX];
+
 		} rfcomm;
 
 		struct {
@@ -151,9 +163,9 @@ struct ba_transport {
 			/* parent RFCOMM transport */
 			struct ba_transport *rfcomm;
 
-			/* if non-zero, equivalent of gain = 0 */
-			uint8_t spk_muted;
-			uint8_t mic_muted;
+			/* if true, equivalent of gain = 0 */
+			bool spk_muted;
+			bool mic_muted;
 			/* software audio gain in range [0, 15] */
 			uint8_t spk_gain;
 			uint8_t mic_gain;
@@ -163,9 +175,6 @@ struct ba_transport {
 			 * for separate configurations. */
 			struct ba_pcm spk_pcm;
 			struct ba_pcm mic_pcm;
-
-			/* HF feature flags */
-			uint32_t hf_features;
 
 		} sco;
 
@@ -183,19 +192,21 @@ struct ba_device *device_get(GHashTable *devices, const char *key);
 struct ba_device *device_lookup(GHashTable *devices, const char *key);
 bool device_remove(GHashTable *devices, const char *key);
 
+void device_set_battery_level(struct ba_device *d, uint8_t value);
+
 struct ba_transport *transport_new(
 		struct ba_device *device,
 		enum ba_transport_type type,
 		const char *dbus_owner,
 		const char *dbus_path,
 		enum bluetooth_profile profile,
-		uint8_t codec);
+		uint16_t codec);
 struct ba_transport *transport_new_a2dp(
 		struct ba_device *device,
 		const char *dbus_owner,
 		const char *dbus_path,
 		enum bluetooth_profile profile,
-		uint8_t codec,
+		uint16_t codec,
 		const uint8_t *config,
 		size_t config_size);
 struct ba_transport *transport_new_rfcomm(
@@ -227,5 +238,7 @@ int transport_acquire_bt_sco(struct ba_transport *t);
 int transport_release_bt_sco(struct ba_transport *t);
 
 int transport_release_pcm(struct ba_pcm *pcm);
+
+void transport_pthread_cleanup(void *arg);
 
 #endif

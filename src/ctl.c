@@ -55,16 +55,15 @@ static int _transport_lookup(GHashTable *devices, const bdaddr_t *addr,
 
 	GHashTableIter iter_d, iter_t;
 	struct ba_device *d;
-	gpointer _tmp;
 
 	for (g_hash_table_iter_init(&iter_d, devices);
-			g_hash_table_iter_next(&iter_d, &_tmp, (gpointer)&d); ) {
+			g_hash_table_iter_next(&iter_d, NULL, (gpointer)&d); ) {
 
 		if (bacmp(&d->addr, addr) != 0)
 			continue;
 
 		for (g_hash_table_iter_init(&iter_t, d->transports);
-				g_hash_table_iter_next(&iter_t, &_tmp, (gpointer)t); ) {
+				g_hash_table_iter_next(&iter_t, NULL, (gpointer)t); ) {
 
 			switch (type) {
 			case PCM_TYPE_NULL:
@@ -225,19 +224,18 @@ static void ctl_thread_cmd_list_devices(const struct request *req, int fd) {
 	struct msg_device device;
 	GHashTableIter iter_d;
 	struct ba_device *d;
-	gpointer _tmp;
 
 	pthread_mutex_lock(&config.devices_mutex);
 
 	for (g_hash_table_iter_init(&iter_d, config.devices);
-			g_hash_table_iter_next(&iter_d, &_tmp, (gpointer)&d); ) {
+			g_hash_table_iter_next(&iter_d, NULL, (gpointer)&d); ) {
 
 		bacpy(&device.addr, &d->addr);
 		strncpy(device.name, d->name, sizeof(device.name) - 1);
 		device.name[sizeof(device.name) - 1] = '\0';
 
-		device.battery = d->xapl.features & XAPL_FEATURE_BATTERY ? 1 : 0;
-		device.battery_level = d->xapl.accev_battery;
+		device.battery = d->battery.enabled;
+		device.battery_level = d->battery.level;
 
 		send(fd, &device, sizeof(device), MSG_NOSIGNAL);
 	}
@@ -254,14 +252,16 @@ static void ctl_thread_cmd_list_transports(const struct request *req, int fd) {
 	GHashTableIter iter_d, iter_t;
 	struct ba_device *d;
 	struct ba_transport *t;
-	gpointer _tmp;
 
 	pthread_mutex_lock(&config.devices_mutex);
 
 	for (g_hash_table_iter_init(&iter_d, config.devices);
-			g_hash_table_iter_next(&iter_d, &_tmp, (gpointer)&d); )
+			g_hash_table_iter_next(&iter_d, NULL, (gpointer)&d); )
 		for (g_hash_table_iter_init(&iter_t, d->transports);
-				g_hash_table_iter_next(&iter_t, &_tmp, (gpointer)&t); ) {
+				g_hash_table_iter_next(&iter_t, NULL, (gpointer)&t); ) {
+			/* ignore SCO transport if codec is not selected yet */
+			if (t->type == TRANSPORT_TYPE_SCO && t->codec == HFP_CODEC_UNDEFINED)
+				continue;
 			_ctl_transport(t, &transport);
 			send(fd, &transport, sizeof(transport), MSG_NOSIGNAL);
 		}

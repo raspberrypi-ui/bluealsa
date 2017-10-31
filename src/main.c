@@ -97,8 +97,8 @@ int main(int argc, char **argv) {
 		switch (opt) {
 
 		case 'h' /* --help */ :
-			printf("usage: %s [OPTION]...\n\n"
-					"options:\n"
+			printf("usage: %s [OPTION]...\n"
+					"\noptions:\n"
 					"  -h, --help\t\tprint this help and exit\n"
 					"  -V, --version\t\tprint version and exit\n"
 					"  -i, --device=hciX\tHCI device to use\n"
@@ -214,8 +214,7 @@ int main(int argc, char **argv) {
 
 	bluez_subscribe_signals();
 
-	if (config.enable_a2dp)
-		bluez_register_a2dp();
+	bluez_register_a2dp();
 	bluez_register_hfp();
 
 	struct sigaction sigact = { .sa_handler = main_loop_stop };

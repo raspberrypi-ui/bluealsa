@@ -34,8 +34,6 @@ AM_COND_IF([ENABLE_DEBUG_TIME], [
 
 AC_CHECK_LIB([pthread], [pthread_create],
 	[], [AC_MSG_ERROR([pthread library not found])])
-AC_CHECK_HEADERS([ortp/rtp.h],
-	[], [AC_MSG_ERROR([ortp/rtp.h header not found])])
 AC_SEARCH_LIBS([clock_gettime], [rt],
 	[], [AC_MSG_ERROR([unable to find clock_gettime() function])])
 AC_SEARCH_LIBS([pow], [m],
@@ -43,7 +41,7 @@ AC_SEARCH_LIBS([pow], [m],
 
 PKG_CHECK_MODULES([ALSA], [alsa])
 PKG_CHECK_MODULES([BLUEZ], [bluez >= 5.0])
-PKG_CHECK_MODULES([GLIB2], [glib-2.0 >= 2.16])
+PKG_CHECK_MODULES([GLIB2], [glib-2.0 >= 2.26])
 PKG_CHECK_MODULES([GIO2], [gio-unix-2.0])
 PKG_CHECK_MODULES([SBC], [sbc >= 1.2])
 
@@ -55,6 +53,14 @@ AM_CONDITIONAL([ENABLE_AAC], [test "x$enable_aac" = "xyes"])
 AM_COND_IF([ENABLE_AAC], [
 	PKG_CHECK_MODULES([AAC], [fdk-aac >= 0.1.1])
 	AC_DEFINE([ENABLE_AAC], [1], [Define to 1 if AAC is enabled.])
+])
+
+AC_ARG_ENABLE([aptx],
+	[AS_HELP_STRING([--enable-aptx], [enable apt-X support])])
+AM_CONDITIONAL([ENABLE_APTX], [test "x$enable_aptx" = "xyes"])
+AM_COND_IF([ENABLE_APTX], [
+	PKG_CHECK_MODULES([APTX], [openaptx >= 1.0.0])
+	AC_DEFINE([ENABLE_APTX], [1], [Define to 1 if apt-X is enabled.])
 ])
 
 AC_ARG_ENABLE([payloadcheck],

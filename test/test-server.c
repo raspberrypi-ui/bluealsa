@@ -22,6 +22,7 @@
 #include "inc/test.inc"
 
 #include "../src/bluealsa.c"
+#include "../src/at.c"
 #include "../src/ctl.c"
 #include "../src/io.h"
 #define io_thread_a2dp_sink_sbc _io_thread_a2dp_sink_sbc
@@ -29,10 +30,12 @@
 #include "../src/io.c"
 #undef io_thread_a2dp_sink_sbc
 #undef io_thread_a2dp_source_sbc
+#include "../src/rfcomm.c"
 #define transport_acquire_bt_a2dp _transport_acquire_bt_a2dp
 #include "../src/transport.c"
 #undef transport_acquire_bt_a2dp
 #include "../src/utils.c"
+#include "../src/shared/ffb.c"
 #include "../src/shared/rt.c"
 
 static const a2dp_sbc_t cconfig = {

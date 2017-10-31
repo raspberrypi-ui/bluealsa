@@ -30,30 +30,19 @@
 # define AACENCODER_LIB_VERSION LIB_VERSION( \
 		AACENCODER_LIB_VL0, AACENCODER_LIB_VL1, AACENCODER_LIB_VL2)
 #endif
+#if ENABLE_APTX
+# include <openaptx.h>
+#endif
 
 #include "a2dp-codecs.h"
 #include "a2dp-rtp.h"
 #include "bluealsa.h"
 #include "transport.h"
 #include "utils.h"
+#include "shared/ffb.h"
 #include "shared/log.h"
 #include "shared/rt.h"
 
-
-/**
- * Wrapper for release callback, which can be used by pthread cleanup. */
-static void io_thread_release(struct ba_transport *t) {
-
-	/* During the normal operation mode, the release callback should not
-	 * be NULL. Hence, we will relay on this callback - file descriptors
-	 * are closed in it. */
-	if (t->release != NULL)
-		t->release(t);
-
-	/* XXX: If the order of the cleanup push is right, this function will
-	 *      indicate the end of the IO thread. */
-	debug("Exiting IO thread");
-}
 
 /**
  * Open PCM for reading. */
@@ -133,7 +122,7 @@ static ssize_t io_thread_read_pcm(struct ba_pcm *pcm, int16_t *buffer, size_t sa
 
 	uint8_t *head = (uint8_t *)buffer;
 	size_t len = samples * sizeof(int16_t);
-	ssize_t ret;
+	ssize_t ret = 1;  /* allow "reading" zero samples */
 
 	/* This call will block until data arrives. If the passed file descriptor
 	 * is invalid (e.g. -1) is means, that other thread (the controller) has
@@ -193,50 +182,13 @@ static ssize_t io_thread_write_pcm(struct ba_pcm *pcm, const int16_t *buffer, si
 	return samples;
 }
 
-/**
- * Convenient wrapper for writing to the RFCOMM socket. */
-static ssize_t io_thread_write_rfcomm(int fd, const char *msg) {
-
-	size_t len = strlen(msg);
-	ssize_t ret;
-
-retry:
-	if ((ret = write(fd, msg, len)) == -1) {
-		if (errno == EINTR)
-			goto retry;
-		error("RFCOMM write error: %s", strerror(errno));
-	}
-
-	return ret;
-}
-
-/**
- * Write AT command to the RFCOMM. */
-static ssize_t io_thread_write_at_command(int fd, const char *msg) {
-
-	char buffer[64];
-
-	snprintf(buffer, sizeof(buffer), "%s\r", msg);
-	return io_thread_write_rfcomm(fd, buffer);
-}
-
-/**
- * Write AT response code to the RFCOMM. */
-static ssize_t io_thread_write_at_response(int fd, const char *msg) {
-
-	char buffer[64];
-
-	snprintf(buffer, sizeof(buffer), "\r\n%s\r\n", msg);
-	return io_thread_write_rfcomm(fd, buffer);
-}
-
 void *io_thread_a2dp_sink_sbc(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	/* Cancellation should be possible only in the carefully selected place
 	 * in order to prevent memory leaks and resources not being released. */
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(CANCEL_ROUTINE(io_thread_release), t);
+	pthread_cleanup_push(CANCEL_ROUTINE(transport_pthread_cleanup), t);
 
 	if (t->bt_fd == -1) {
 		error("Invalid BT socket: %d", t->bt_fd);
@@ -391,7 +343,7 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(CANCEL_ROUTINE(io_thread_release), t);
+	pthread_cleanup_push(CANCEL_ROUTINE(transport_pthread_cleanup), t);
 
 	sbc_t sbc;
 
@@ -446,8 +398,8 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 	rtp_payload = (rtp_payload_sbc_t *)&rtp_header->csrc[rtp_header->cc];
 	memset(rtp_payload, 0, sizeof(*rtp_payload));
 
-	/* reading head position and available read length */
-	int16_t *in_buffer_head = in_buffer;
+	/* buffer tail position and available capacity */
+	int16_t *in_buffer_tail = in_buffer;
 	size_t in_samples = in_buffer_size / sizeof(int16_t);
 
 	struct asrsync asrs = { .frames = 0 };
@@ -480,7 +432,7 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 		}
 
 		/* read data from the FIFO - this function will block */
-		if ((samples = io_thread_read_pcm(&t->a2dp.pcm, in_buffer_head, in_samples)) <= 0) {
+		if ((samples = io_thread_read_pcm(&t->a2dp.pcm, in_buffer_tail, in_samples)) <= 0) {
 			if (samples == -1)
 				error("FIFO read error: %s", strerror(errno));
 			goto fail;
@@ -497,10 +449,10 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 
 		if (!config.a2dp_volume)
 			/* scale volume or mute audio signal */
-			io_thread_scale_pcm(t, in_buffer_head, samples, channels);
+			io_thread_scale_pcm(t, in_buffer_tail, samples, channels);
 
 		/* overall input buffer size */
-		samples += in_buffer_head - in_buffer;
+		samples += in_buffer_tail - in_buffer;
 
 		const uint8_t *input = (uint8_t *)in_buffer;
 		size_t input_len = samples * sizeof(int16_t);
@@ -565,8 +517,8 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 		 * of our linear buffer. */
 		if (samples > 0 && (uint8_t *)in_buffer != input)
 			memmove(in_buffer, input, samples * sizeof(int16_t));
-		/* reposition our reading head */
-		in_buffer_head = in_buffer + samples;
+		/* reposition our buffer tail */
+		in_buffer_tail = in_buffer + samples;
 		in_samples = in_buffer_size / sizeof(int16_t) - samples;
 
 	}
@@ -586,7 +538,7 @@ void *io_thread_a2dp_sink_aac(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(CANCEL_ROUTINE(io_thread_release), t);
+	pthread_cleanup_push(CANCEL_ROUTINE(transport_pthread_cleanup), t);
 
 	if (t->bt_fd == -1) {
 		error("Invalid BT socket: %d", t->bt_fd);
@@ -744,7 +696,7 @@ void *io_thread_a2dp_source_aac(void *arg) {
 	const a2dp_aac_t *cconfig = (a2dp_aac_t *)t->a2dp.cconfig;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(CANCEL_ROUTINE(io_thread_release), t);
+	pthread_cleanup_push(CANCEL_ROUTINE(transport_pthread_cleanup), t);
 
 	HANDLE_AACENCODER handle;
 	AACENC_InfoStruct aacinf;
@@ -829,14 +781,14 @@ void *io_thread_a2dp_source_aac(void *arg) {
 	int out_buffer_identifier = OUT_BITSTREAM_DATA;
 	int in_buffer_element_size = sizeof(int16_t);
 	int out_buffer_element_size = 1;
-	int16_t *in_buffer, *in_buffer_head;
+	int16_t *in_buffer, *in_buffer_tail;
 	uint8_t *out_buffer, *out_payload;
 	int in_buffer_size;
 	int out_payload_size;
 
 	AACENC_BufDesc in_buf = {
 		.numBufs = 1,
-		.bufs = (void **)&in_buffer_head,
+		.bufs = (void **)&in_buffer_tail,
 		.bufferIdentifiers = &in_buffer_identifier,
 		.bufSizes = &in_buffer_size,
 		.bufElSizes = &in_buffer_element_size,
@@ -883,9 +835,9 @@ void *io_thread_a2dp_source_aac(void *arg) {
 		goto fail;
 	}
 
-	/* initial input buffer head position and the available size */
+	/* initial input buffer tail and the available capacity */
 	size_t in_samples = in_buffer_size / in_buffer_element_size;
-	in_buffer_head = in_buffer;
+	in_buffer_tail = in_buffer;
 
 	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
@@ -917,7 +869,7 @@ void *io_thread_a2dp_source_aac(void *arg) {
 		}
 
 		/* read data from the FIFO - this function will block */
-		if ((samples = io_thread_read_pcm(&t->a2dp.pcm, in_buffer_head, in_samples)) <= 0) {
+		if ((samples = io_thread_read_pcm(&t->a2dp.pcm, in_buffer_tail, in_samples)) <= 0) {
 			if (samples == -1)
 				error("FIFO read error: %s", strerror(errno));
 			goto fail;
@@ -930,12 +882,12 @@ void *io_thread_a2dp_source_aac(void *arg) {
 
 		if (!config.a2dp_volume)
 			/* scale volume or mute audio signal */
-			io_thread_scale_pcm(t, in_buffer_head, samples, channels);
+			io_thread_scale_pcm(t, in_buffer_tail, samples, channels);
 
 		/* overall input buffer size */
-		samples += in_buffer_head - in_buffer;
-		/* in the encoding loop head is used for reading */
-		in_buffer_head = in_buffer;
+		samples += in_buffer_tail - in_buffer;
+		/* in the encoding loop tail is used for reading */
+		in_buffer_tail = in_buffer;
 
 		while ((in_args.numInSamples = samples) != 0) {
 
@@ -989,9 +941,9 @@ void *io_thread_a2dp_source_aac(void *arg) {
 
 			}
 
-			/* progress the head position by the number of samples consumed by the
+			/* progress the tail position by the number of samples consumed by the
 			 * encoder, also adjust the number of samples in the input buffer */
-			in_buffer_head += out_args.numInSamples;
+			in_buffer_tail += out_args.numInSamples;
 			samples -= out_args.numInSamples;
 
 			/* keep data transfer at a constant bit rate, also
@@ -1004,10 +956,10 @@ void *io_thread_a2dp_source_aac(void *arg) {
 		}
 
 		/* move leftovers to the beginning */
-		if (samples > 0 && in_buffer != in_buffer_head)
-			memmove(in_buffer, in_buffer_head, samples * in_buffer_element_size);
-		/* reposition input buffer head */
-		in_buffer_head = in_buffer + samples;
+		if (samples > 0 && in_buffer != in_buffer_tail)
+			memmove(in_buffer, in_buffer_tail, samples * in_buffer_element_size);
+		/* reposition input buffer tail */
+		in_buffer_tail = in_buffer + samples;
 		in_samples = in_buffer_size / in_buffer_element_size - samples;
 
 	}
@@ -1024,30 +976,222 @@ fail_open:
 }
 #endif
 
-void *io_thread_rfcomm(void *arg) {
+#if ENABLE_APTX
+void *io_thread_a2dp_source_aptx(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(CANCEL_ROUTINE(io_thread_release), t);
+	pthread_cleanup_push(CANCEL_ROUTINE(transport_pthread_cleanup), t);
 
-	uint8_t mic_gain = t->rfcomm.sco->sco.mic_gain;
-	uint8_t spk_gain = t->rfcomm.sco->sco.spk_gain;
-	char buffer[64];
+	APTXENC handle = malloc(SizeofAptxbtenc());
+	pthread_cleanup_push(CANCEL_ROUTINE(free), handle);
 
+	if (handle == NULL || aptxbtenc_init(handle, __BYTE_ORDER == __LITTLE_ENDIAN) != 0) {
+		error("Couldn't initialize apt-X encoder: %s", strerror(errno));
+		goto fail_init;
+	}
+
+	const unsigned int channels = transport_get_channels(t);
+	const size_t aptx_pcm_samples = 4 * channels;
+	const size_t aptx_code_len = 2 * sizeof(uint16_t);
+	const size_t mtu_write = t->mtu_write;
+
+	const size_t in_buffer_size = aptx_pcm_samples * sizeof(int16_t) * (mtu_write / aptx_code_len);
+	const size_t out_buffer_size = mtu_write;
+	int16_t *in_buffer = malloc(in_buffer_size);
+	uint8_t *out_buffer = malloc(out_buffer_size);
+
+	pthread_cleanup_push(CANCEL_ROUTINE(free), in_buffer);
+	pthread_cleanup_push(CANCEL_ROUTINE(free), out_buffer);
+
+	if (in_buffer == NULL || out_buffer == NULL) {
+		error("Couldn't create data buffers: %s", strerror(ENOMEM));
+		goto fail;
+	}
+
+	if (io_thread_open_pcm_read(&t->a2dp.pcm) == -1) {
+		error("Couldn't open FIFO: %s", strerror(errno));
+		goto fail;
+	}
+
+	/* buffer tail position and available capacity */
+	int16_t *in_buffer_tail = in_buffer;
+	size_t in_samples = in_buffer_size / sizeof(int16_t);
+
+	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
-		{ t->bt_fd, POLLIN, 0 },
+		{ -1, POLLIN, 0 },
 	};
 
-	debug("Starting RFCOMM loop: %s",
+	debug("Starting IO loop: %s",
 			bluetooth_profile_to_string(t->profile, t->codec));
 	for (;;) {
-
-		const char *response = "OK";
-		char command[16], value[32];
-		ssize_t ret;
-
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+		ssize_t samples;
+
+		/* add PCM socket to the poll if transport is active */
+		pfds[1].fd = t->state == TRANSPORT_ACTIVE ? t->a2dp.pcm.fd : -1;
+
+		if (poll(pfds, sizeof(pfds) / sizeof(*pfds), -1) == -1) {
+			error("Transport poll error: %s", strerror(errno));
+			goto fail;
+		}
+
+		if (pfds[0].revents & POLLIN) {
+			/* dispatch incoming event */
+			eventfd_t event;
+			eventfd_read(pfds[0].fd, &event);
+			asrs.frames = 0;
+			continue;
+		}
+
+		/* read data from the FIFO - this function will block */
+		if ((samples = io_thread_read_pcm(&t->a2dp.pcm, in_buffer_tail, in_samples)) <= 0) {
+			if (samples == -1)
+				error("FIFO read error: %s", strerror(errno));
+			goto fail;
+		}
+
+		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+
+		if (asrs.frames == 0)
+			asrsync_init(asrs, transport_get_sampling(t));
+
+		if (!config.a2dp_volume)
+			/* scale volume or mute audio signal */
+			io_thread_scale_pcm(t, in_buffer_tail, samples, channels);
+
+		const int16_t *input = in_buffer;
+		/* overall number of input samples */
+		samples += in_buffer_tail - in_buffer;
+
+		/* encode and transfer obtained data */
+		while ((size_t)samples >= aptx_pcm_samples) {
+
+			uint8_t *output = out_buffer;
+			size_t output_len = out_buffer_size - (output - out_buffer);
+			size_t pcm_frames = 0;
+
+			/* Generate as many apt-X frames as possible to fill the output buffer
+			 * without overflowing it. The size of the output buffer is based on
+			 * the socket MTU, so such a transfer should be most efficient. */
+			while ((size_t)samples >= aptx_pcm_samples && output_len >= aptx_code_len) {
+
+				int32_t pcm_l[4];
+				int32_t pcm_r[4];
+				size_t i;
+
+				for (i = 0; i < 4; i++) {
+					pcm_l[i] = input[2 * i];
+					pcm_r[i] = input[2 * i + 1];
+				}
+
+				if (aptxbtenc_encodestereo(handle, pcm_l, pcm_r, (uint16_t *)output) != 0) {
+					error("apt-X encoding error: %s", strerror(errno));
+					break;
+				}
+
+				input += 4 * channels;
+				samples -= 4 * channels;
+				output += aptx_code_len;
+				output_len -= aptx_code_len;
+				pcm_frames += 4;
+
+			}
+
+			if (write(t->bt_fd, out_buffer, output - out_buffer) == -1) {
+				if (errno == ECONNRESET || errno == ENOTCONN) {
+					/* exit the thread upon BT socket disconnection */
+					debug("BT socket disconnected");
+					goto fail;
+				}
+				error("BT socket write error: %s", strerror(errno));
+			}
+
+			/* keep data transfer at a constant bit rate */
+			asrsync_sync(&asrs, pcm_frames);
+			t->delay = asrs.ts_busy.tv_nsec / 100000;
+
+		}
+
+		/* If the input buffer was not consumed (due to codesize limit), we
+		 * have to append new data to the existing one. Since we do not use
+		 * ring buffer, we will simply move unprocessed data to the front
+		 * of our linear buffer. */
+		if (samples > 0 && in_buffer != input)
+			memmove(in_buffer, input, samples * sizeof(int16_t));
+		/* reposition our buffer tail */
+		in_buffer_tail = in_buffer + samples;
+		in_samples = in_buffer_size / sizeof(int16_t) - samples;
+
+	}
+
+fail:
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+fail_init:
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
+	return NULL;
+}
+#endif
+
+void *io_thread_sco(void *arg) {
+	struct ba_transport *t = (struct ba_transport *)arg;
+
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_push(CANCEL_ROUTINE(transport_pthread_cleanup), t);
+
+	/* buffers for transferring data to and fro SCO socket */
+	struct ffb bt_in = { 0 };
+	struct ffb bt_out = { 0 };
+	pthread_cleanup_push(CANCEL_ROUTINE(ffb_free), &bt_in);
+	pthread_cleanup_push(CANCEL_ROUTINE(ffb_free), &bt_out);
+
+	/* these buffers shall be bigger than the SCO MTU */
+	if (ffb_init(&bt_in, 128) == -1 || ffb_init(&bt_out, 128) == -1) {
+		error("Couldn't create data buffer: %s", strerror(ENOMEM));
+		goto fail;
+	}
+
+	struct asrsync asrs = { .frames = 0 };
+	struct pollfd pfds[] = {
+		{ t->event_fd, POLLIN, 0 },
+		/* SCO socket */
+		{ -1, POLLIN, 0 },
+		{ -1, POLLOUT, 0 },
+		/* PCM FIFO */
+		{ -1, POLLIN, 0 },
+		{ -1, POLLOUT, 0 },
+	};
+
+	debug("Starting IO loop: %s",
+			bluetooth_profile_to_string(t->profile, t->codec));
+	for (;;) {
+		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+		/* fresh-start for file descriptors polling */
+		pfds[1].fd = pfds[2].fd = -1;
+		pfds[3].fd = pfds[4].fd = -1;
+
+		switch (t->codec) {
+		case HFP_CODEC_CVSD:
+		default:
+			if (ffb_len_in(&bt_in) >= t->mtu_read)
+				pfds[1].fd = t->bt_fd;
+			if (ffb_len_out(&bt_out) >= t->mtu_write)
+				pfds[2].fd = t->bt_fd;
+			if (ffb_len_in(&bt_out) >= t->mtu_write)
+				pfds[3].fd = t->sco.spk_pcm.fd;
+			if (ffb_len_out(&bt_in) >= t->mtu_read)
+				pfds[4].fd = t->sco.mic_pcm.fd;
+		}
+
+		if (t->sco.mic_pcm.fd == -1)
+			pfds[1].fd = -1;
 
 		if (poll(pfds, sizeof(pfds) / sizeof(*pfds), -1) == -1) {
 			error("Transport poll error: %s", strerror(errno));
@@ -1062,161 +1206,28 @@ void *io_thread_rfcomm(void *arg) {
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
 
-			if (mic_gain != t->rfcomm.sco->sco.mic_gain) {
-				mic_gain = t->rfcomm.sco->sco.mic_gain;
-				debug("Setting microphone gain: %d", mic_gain);
-				sprintf(buffer, "+VGM=%d", mic_gain);
-				io_thread_write_at_response(pfds[1].fd, buffer);
-			}
-			if (spk_gain != t->rfcomm.sco->sco.spk_gain) {
-				spk_gain = t->rfcomm.sco->sco.spk_gain;
-				debug("Setting speaker gain: %d", spk_gain);
-				sprintf(buffer, "+VGS=%d", spk_gain);
-				io_thread_write_at_response(pfds[1].fd, buffer);
-			}
-
-			continue;
-		}
-
-		if ((ret = read(pfds[1].fd, buffer, sizeof(buffer))) == -1) {
-			switch (errno) {
-			case ECONNABORTED:
-			case ECONNRESET:
-			case ENOTCONN:
-			case ETIMEDOUT:
-				/* exit the thread upon socket disconnection */
-				debug("RFCOMM disconnected: %s", strerror(errno));
-				transport_set_state(t, TRANSPORT_ABORTED);
-				goto fail;
-			default:
-				error("RFCOMM read error: %s", strerror(errno));
-				continue;
-			}
-		}
-
-		/* Parse AT command received from the headset. */
-		if (sscanf(buffer, "AT%15[^=]=%30s", command, value) != 2) {
-			warn("Invalid AT command: %s", buffer);
-			continue;
-		}
-
-		debug("AT command: %s=%s", command, value);
-
-		if (strcmp(command, "RING") == 0) {
-		}
-		else if (strcmp(command, "+CKPD") == 0 && atoi(value) == 200) {
-		}
-		else if (strcmp(command, "+VGM") == 0) {
-			t->rfcomm.sco->sco.mic_gain = mic_gain = atoi(value);
-			bluealsa_event();
-		}
-		else if (strcmp(command, "+VGS") == 0) {
-			t->rfcomm.sco->sco.spk_gain = spk_gain = atoi(value);
-			bluealsa_event();
-		}
-		else if (strcmp(command, "+IPHONEACCEV") == 0) {
-
-			char *ptr = value;
-			size_t count = atoi(strsep(&ptr, ","));
-			char tmp;
-
-			while (count-- && ptr != NULL)
-				switch (tmp = *strsep(&ptr, ",")) {
-				case '1':
-					if (ptr != NULL)
-						t->device->xapl.accev_battery = atoi(strsep(&ptr, ","));
-						bluealsa_event();
-					break;
-				case '2':
-					if (ptr != NULL)
-						t->device->xapl.accev_docked = atoi(strsep(&ptr, ","));
-					break;
-				default:
-					warn("Unsupported IPHONEACCEV key: %c", tmp);
-					strsep(&ptr, ",");
-				}
-
-		}
-		else if (strcmp(command, "+XAPL") == 0) {
-
-			unsigned int vendor, product;
-			unsigned int version, features;
-
-			if (sscanf(value, "%x-%x-%u,%u", &vendor, &product, &version, &features) == 4) {
-				t->device->xapl.vendor_id = vendor;
-				t->device->xapl.product_id = product;
-				t->device->xapl.version = version;
-				t->device->xapl.features = features;
-				response = "+XAPL=BlueALSA,0";
-			}
-			else {
-				warn("Invalid XAPL value: %s", value);
-				response = "ERROR";
-			}
-
-		}
-		else {
-			warn("Unsupported AT command: %s=%s", command, value);
-			response = "ERROR";
-		}
-
-		io_thread_write_at_response(pfds[1].fd, response);
-	}
-
-fail:
-	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_pop(1);
-	return NULL;
-}
-
-void *io_thread_sco(void *arg) {
-	struct ba_transport *t = (struct ba_transport *)arg;
-
-	/* this buffer has to be bigger than SCO MTU */
-	const size_t buffer_size = 512;
-	int16_t *buffer = malloc(buffer_size);
-
-	pthread_cleanup_push(CANCEL_ROUTINE(free), buffer);
-
-	if (buffer == NULL) {
-		error("Couldn't create data buffers: %s", strerror(ENOMEM));
-		goto fail;
-	}
-
-	struct asrsync asrs = { .frames = 0 };
-	struct pollfd pfds[] = {
-		{ t->event_fd, POLLIN, 0 },
-		{ -1, POLLIN, 0 },
-		{ -1, POLLIN, 0 },
-	};
-
-	debug("Starting IO loop: %s",
-			bluetooth_profile_to_string(t->profile, t->codec));
-	for (;;) {
-
-		pfds[1].fd = t->sco.mic_pcm.fd != -1 ? t->bt_fd : -1;
-		pfds[2].fd = t->sco.spk_pcm.fd;
-
-		if (poll(pfds, sizeof(pfds) / sizeof(*pfds), -1) == -1) {
-			error("Transport poll error: %s", strerror(errno));
-			goto fail;
-		}
-
-		if (pfds[0].revents & POLLIN) {
-			/* dispatch incoming event */
-
-			eventfd_t event;
-			eventfd_read(pfds[0].fd, &event);
-
 			/* Try to open reading and/or writing PCM file descriptor. Note,
 			 * that we are not checking for errors, because we don't care. */
 			io_thread_open_pcm_read(&t->sco.spk_pcm);
 			io_thread_open_pcm_write(&t->sco.mic_pcm);
 
+			const enum hfp_ind *inds = t->sco.rfcomm->rfcomm.hfp_inds;
+			bool release = false;
+
 			/* It is required to release SCO if we are not transferring audio,
 			 * because it will free Bluetooth bandwidth - microphone signal is
 			 * transfered even though we are not reading from it! */
-			if (t->sco.spk_pcm.fd == -1 && t->sco.mic_pcm.fd == -1) {
+			if (t->sco.spk_pcm.fd == -1 && t->sco.mic_pcm.fd == -1)
+				release = true;
+			/* For HFP HF we have to check if we are in the call stage or in the
+			 * call setup stage. Otherwise, it might be not possible to acquire
+			 * SCO connection. */
+			if (t->profile == BLUETOOTH_PROFILE_HFP_HF &&
+					inds[HFP_IND_CALL] == HFP_IND_CALL_NONE &&
+					inds[HFP_IND_CALLSETUP] == HFP_IND_CALLSETUP_NONE)
+				release = true;
+
+			if (release) {
 				transport_release_bt_sco(t);
 				asrs.frames = 0;
 			}
@@ -1230,23 +1241,97 @@ void *io_thread_sco(void *arg) {
 			asrsync_init(asrs, transport_get_sampling(t));
 
 		if (pfds[1].revents & POLLIN) {
+			/* dispatch incoming SCO data */
 
+			uint8_t *buffer;
+			size_t buffer_len;
 			ssize_t len;
 
-			if ((len = read(pfds[1].fd, buffer, buffer_size)) == -1) {
-				debug("SCO read error: %s", strerror(errno));
-				continue;
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				buffer = bt_in.tail;
+				buffer_len = ffb_len_in(&bt_in);
 			}
 
-			if (t->sco.mic_muted)
-				snd_pcm_scale_s16le(buffer, len / sizeof(int16_t), 1, 0, 0);
+retry_sco_read:
+			errno = 0;
+			if ((len = read(pfds[1].fd, buffer, buffer_len)) <= 0)
+				switch (errno) {
+				case EINTR:
+					goto retry_sco_read;
+				case 0:
+				case ECONNABORTED:
+				case ECONNRESET:
+					transport_release_bt_sco(t);
+					continue;
+				default:
+					error("SCO read error: %s", strerror(errno));
+					continue;
+				}
 
-			write(t->sco.mic_pcm.fd, buffer, len);
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				ffb_seek(&bt_in, len);
+			}
+
+		}
+		else if (pfds[1].revents & (POLLERR | POLLHUP)) {
+			debug("SCO poll error status: 0x%x", pfds[1].revents);
+			transport_release_bt_sco(t);
 		}
 
-		if (pfds[2].revents & POLLIN) {
+		if (pfds[2].revents & POLLOUT) {
+			/* write-out SCO data */
 
-			ssize_t samples = t->mtu_write / sizeof(int16_t);
+			uint8_t *buffer;
+			size_t buffer_len;
+			ssize_t len;
+
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				buffer = bt_out.data;
+				buffer_len = t->mtu_write;
+			}
+
+retry_sco_write:
+			errno = 0;
+			if ((len = write(pfds[2].fd, buffer, buffer_len)) <= 0)
+				switch (errno) {
+				case EINTR:
+					goto retry_sco_write;
+				case 0:
+				case ECONNABORTED:
+				case ECONNRESET:
+					transport_release_bt_sco(t);
+					continue;
+				default:
+					error("SCO write error: %s", strerror(errno));
+					continue;
+				}
+
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				ffb_rewind(&bt_out, len);
+			}
+
+		}
+
+		if (pfds[3].revents & POLLIN) {
+			/* dispatch incoming PCM data */
+
+			int16_t *buffer;
+			ssize_t samples;
+
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				buffer = (int16_t *)bt_out.tail;
+				samples = ffb_len_in(&bt_out) / sizeof(int16_t);
+			}
 
 			/* read data from the FIFO - this function will block */
 			if ((samples = io_thread_read_pcm(&t->sco.spk_pcm, buffer, samples)) <= 0) {
@@ -1258,7 +1343,42 @@ void *io_thread_sco(void *arg) {
 			if (t->sco.spk_muted)
 				snd_pcm_scale_s16le(buffer, samples, 1, 0, 0);
 
-			write(t->bt_fd, buffer, samples * sizeof(int16_t));
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				ffb_seek(&bt_out, samples * sizeof(int16_t));
+			}
+
+		}
+		else if (pfds[3].revents & (POLLERR | POLLHUP)) {
+			debug("PCM poll error status: 0x%x", pfds[3].revents);
+		}
+
+		if (pfds[4].revents & POLLOUT) {
+			/* write-out PCM data */
+
+			int16_t *buffer;
+			ssize_t samples;
+
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				buffer = (int16_t *)bt_in.data;
+				samples = ffb_len_out(&bt_in) / sizeof(int16_t);
+			}
+
+			if (t->sco.mic_muted)
+				snd_pcm_scale_s16le(buffer, samples, 1, 0, 0);
+
+			if (io_thread_write_pcm(&t->sco.mic_pcm, buffer, samples) == -1)
+				error("FIFO write error: %s", strerror(errno));
+
+			switch (t->codec) {
+			case HFP_CODEC_CVSD:
+			default:
+				ffb_rewind(&bt_in, samples * sizeof(int16_t));
+			}
+
 		}
 
 		/* keep data transfer at a constant bit rate */
@@ -1268,6 +1388,9 @@ void *io_thread_sco(void *arg) {
 	}
 
 fail:
+	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+	pthread_cleanup_pop(1);
+	pthread_cleanup_pop(1);
 	pthread_cleanup_pop(1);
 	return NULL;
 }
