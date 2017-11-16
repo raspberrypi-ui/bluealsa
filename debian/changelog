@@ -1,3 +1,9 @@
+bluealsa (0.6) stretch; urgency=medium
+
+  * Merge in recent changes to original bluezalsa, including fix for audio truncation
+
+ -- Simon Long <simon@raspberrypi.org>  Thu, 16 Nov 2017 11:20:21 +0000
+
 bluealsa (0.5) stretch; urgency=medium
 
   * Add udev rule to start service when hci0 detected
