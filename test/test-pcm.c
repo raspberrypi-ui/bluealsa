@@ -1,6 +1,6 @@
 /*
  * test-pcm.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -19,6 +19,35 @@
 #include "../src/shared/ffb.c"
 #include "../src/shared/log.h"
 
+
+static char *bin_path = NULL;
+static pid_t bluealsa_pid = 0;
+
+static pid_t start_bluealsa(bool source, unsigned int timeout) {
+
+	char path[256];
+	char arg_timeout[16];
+	pid_t pid;
+
+	sprintf(arg_timeout, "--timeout=%d", timeout);
+
+	char *argv[] = {
+		"test-server",
+		source ? "--source" : "--sink",
+		arg_timeout,
+		NULL,
+	};
+
+	sprintf(path, "%s/test-server", bin_path);
+	/* assert(posix_spawn(&pid, path, NULL, NULL, argv, NULL) == 0); */
+
+	/* XXX: workaround for valgrind-3.13.0 */
+	if ((pid = fork()) == 0)
+		execv(path, argv);
+
+	usleep(100000);
+	return pid;
+}
 
 static int snd_pcm_open_bluealsa(snd_pcm_t **pcmp, snd_pcm_stream_t stream, int mode) {
 
@@ -115,7 +144,7 @@ static int set_sw_params(snd_pcm_t *pcm, snd_pcm_uframes_t buffer_size, snd_pcm_
 	return 0;
 }
 
-int test_hw_constraints(void) {
+int test_playback_hw_constraints(void) {
 
 	/* hard-coded values used in the test-server */
 	const unsigned int server_channels = 2;
@@ -186,14 +215,14 @@ int test_playback(void) {
 	assert(set_sw_params(pcm, buffer_size, period_size) == 0);
 	assert(snd_pcm_prepare(pcm) == 0);
 
-	int16_t *buffer = malloc(period_size * pcm_channels);
+	int16_t *period = malloc(period_size * pcm_channels * sizeof(int16_t));
 	int i, x = 0;
 
 	/* fill-in buffer without starting playback */
 	int buffer_period_count = (buffer_size - 10) / period_size + 1;
 	for (i = 0; i < buffer_period_count - 1; i++) {
-		x = snd_pcm_sine_s16le(buffer, period_size * pcm_channels, pcm_channels, x, 441.0 / pcm_sampling);
-		assert(snd_pcm_writei(pcm, buffer, period_size) > 0);
+		x = snd_pcm_sine_s16le(period, period_size * pcm_channels, pcm_channels, x, 441.0 / pcm_sampling);
+		assert(snd_pcm_writei(pcm, period, period_size) > 0);
 	}
 
 	usleep(100000);
@@ -204,8 +233,8 @@ int test_playback(void) {
 	assert(delay == 18375);
 
 	/* start playback - start threshold will be exceeded */
-	x = snd_pcm_sine_s16le(buffer, period_size * pcm_channels, pcm_channels, x, 441.0 / pcm_sampling);
-	assert(snd_pcm_writei(pcm, buffer, period_size) > 0);
+	x = snd_pcm_sine_s16le(period, period_size * pcm_channels, pcm_channels, x, 441.0 / pcm_sampling);
+	assert(snd_pcm_writei(pcm, period, period_size) > 0);
 	assert(snd_pcm_state(pcm) == SND_PCM_STATE_RUNNING);
 
 	/* at this point buffer should be still almost full */
@@ -230,12 +259,58 @@ int test_playback(void) {
 	/* check successful recovery */
 	assert(snd_pcm_prepare(pcm) == 0);
 	for (i = 0; i < buffer_period_count * 2; i++) {
-		x = snd_pcm_sine_s16le(buffer, period_size * pcm_channels, pcm_channels, x, 441.0 / pcm_sampling);
-		assert(snd_pcm_writei(pcm, buffer, period_size) > 0);
+		x = snd_pcm_sine_s16le(period, period_size * pcm_channels, pcm_channels, x, 441.0 / pcm_sampling);
+		assert(snd_pcm_writei(pcm, period, period_size) > 0);
 	}
 	assert(snd_pcm_state(pcm) == SND_PCM_STATE_RUNNING);
 
 	assert(snd_pcm_close(pcm) == 0);
+
+	free(period);
+	return 0;
+}
+
+int test_playback_termination(void) {
+
+	int pcm_channels = 2;
+	int pcm_sampling = 44100;
+	unsigned int pcm_buffer_time = 500000;
+	unsigned int pcm_period_time = 100000;
+
+	snd_pcm_t *pcm = NULL;
+	snd_pcm_uframes_t buffer_size;
+	snd_pcm_uframes_t period_size;
+
+	assert(snd_pcm_open_bluealsa(&pcm, SND_PCM_STREAM_PLAYBACK, 0) == 0);
+	assert(set_hw_params(pcm, pcm_channels, pcm_sampling, &pcm_buffer_time, &pcm_period_time) == 0);
+	assert(snd_pcm_get_params(pcm, &buffer_size, &period_size) == 0);
+	assert(snd_pcm_prepare(pcm) == 0);
+
+	int16_t *period = malloc(period_size * pcm_channels * sizeof(int16_t));
+	snd_pcm_sframes_t frames = 0;
+	size_t i = 0;
+
+	/* write samples until server disconnects */
+	while (frames >= 0) {
+		if (i++ == 10)
+			kill(bluealsa_pid, SIGUSR2);
+		frames = snd_pcm_writei(pcm, period, period_size);
+	}
+
+	/* check if most commonly used calls will report missing device */
+
+	struct pollfd pfds[2];
+	unsigned short revents;
+
+	assert(frames == -ENODEV);
+	assert(snd_pcm_poll_descriptors_revents(pcm, pfds, 2, &revents) == -ENODEV);
+	assert(snd_pcm_writei(pcm, period, period_size) == -ENODEV);
+	assert(snd_pcm_avail_update(pcm) == -ENODEV);
+	assert(snd_pcm_delay(pcm, &frames) == -ENODEV);
+	assert(snd_pcm_prepare(pcm) == -EBADFD);
+	assert(snd_pcm_close(pcm) == -EACCES);
+
+	free(period);
 	return 0;
 }
 
@@ -246,19 +321,17 @@ int test_capture(void) {
 int main(int argc, char *argv[]) {
 	(void)argc;
 
-	char *ba_argv[] = { "test-server", "--source", NULL };
-	char ba_path[256];
-	pid_t ba_pid;
-
 	/* test-pcm and test-server shall be placed in the same directory */
-	sprintf(ba_path, "%s/test-server", dirname(argv[0]));
-	assert(posix_spawn(&ba_pid, ba_path, NULL, NULL, ba_argv, NULL) == 0);
-	usleep(100000);
+	bin_path = dirname(argv[0]);
 
-	test_run(test_hw_constraints);
+	bluealsa_pid = start_bluealsa(true, 3);
+	test_run(test_playback_hw_constraints);
 	test_run(test_playback);
-	test_run(test_capture);
+	waitpid(bluealsa_pid, NULL, 0);
 
-	wait(NULL);
+	bluealsa_pid = start_bluealsa(true, 2);
+	test_run(test_playback_termination);
+	waitpid(bluealsa_pid, NULL, 0);
+
 	return EXIT_SUCCESS;
 }

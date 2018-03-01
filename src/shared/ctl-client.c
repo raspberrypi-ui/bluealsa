@@ -1,6 +1,6 @@
 /*
  * BlueALSA - ctl-client.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -96,7 +96,7 @@ int bluealsa_open(const char *interface) {
 	snprintf(saddr.sun_path, sizeof(saddr.sun_path) - 1,
 			BLUEALSA_RUN_STATE_DIR "/%s", interface);
 
-	if ((fd = socket(PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1)
+	if ((fd = socket(PF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0)) == -1)
 		return -1;
 
 	debug("Connecting to socket: %s", saddr.sun_path);
@@ -114,15 +114,16 @@ int bluealsa_open(const char *interface) {
  * Subscribe for notifications.
  *
  * @param fd Opened socket file descriptor.
- * @param subscribe If true, client is subscribed, otherwise subscription
- *   is canceled - client will not receive notifications any more.
+ * @param mask Bit-mask with events for which client wants to be subscribed.
+ *   In order to cancel subscription, use empty event mask.
  * @return Upon success this function returns 0. Otherwise, -1 is returned
  *   and errno is set appropriately. */
-int bluealsa_subscribe(int fd, bool subscribe) {
+int bluealsa_subscribe(int fd, enum event mask) {
 	const struct request req = {
-		.command = subscribe ? COMMAND_SUBSCRIBE : COMMAND_UNSUBSCRIBE,
+		.command = COMMAND_SUBSCRIBE,
+		.events = mask,
 	};
-	debug("Subscribing for notifications: %s", subscribe ? "true" : "false");
+	debug("Subscribing for events: %B", mask);
 	return bluealsa_send_request(fd, &req);
 }
 
@@ -277,6 +278,35 @@ int bluealsa_get_transport_delay(int fd, const struct msg_transport *transport) 
 }
 
 /**
+ * Set PCM transport volume.
+ *
+ * @param fd Opened socket file descriptor.
+ * @param transport Address to the transport structure with the addr, type
+ *   and stream fields set - other fields are not used by this function.
+ * @param ch1_muted It true, mute channel 1.
+ * @param ch1_volume Channel 1 volume in range [0, 127].
+ * @param ch2_muted If true, mute channel 2.
+ * @param ch2_volume Channel 2 volume in range [0, 127].
+ * @return Upon success this function returns 0. Otherwise, -1 is returned
+ *   and errno is set appropriately. */
+int bluealsa_set_transport_volume(int fd, const struct msg_transport *transport,
+		bool ch1_muted, int ch1_volume, bool ch2_muted, int ch2_volume) {
+
+	struct request req = {
+		.command = COMMAND_TRANSPORT_SET_VOLUME,
+		.addr = transport->addr,
+		.type = transport->type,
+		.stream = transport->stream,
+		.ch1_muted = ch1_muted,
+		.ch1_volume = ch1_volume,
+		.ch2_muted = ch2_muted,
+		.ch2_volume = ch2_volume,
+	};
+
+	return bluealsa_send_request(fd, &req);
+}
+
+/**
  * Open PCM transport.
  *
  * @param fd Opened socket file descriptor.
@@ -292,9 +322,18 @@ int bluealsa_open_transport(int fd, const struct msg_transport *transport) {
 		.type = transport->type,
 		.stream = transport->stream,
 	};
-	struct msg_pcm res;
+	char buf[256] = "";
+	struct iovec io = {
+		.iov_base = &status,
+		.iov_len = sizeof(status),
+	};
+	struct msghdr msg = {
+		.msg_iov = &io,
+		.msg_iovlen = 1,
+		.msg_control = buf,
+		.msg_controllen = sizeof(buf),
+	};
 	ssize_t len;
-	int pcm;
 
 #if DEBUG
 	char addr_[18];
@@ -304,12 +343,14 @@ int bluealsa_open_transport(int fd, const struct msg_transport *transport) {
 
 	if (send(fd, &req, sizeof(req), MSG_NOSIGNAL) == -1)
 		return -1;
-	if ((len = read(fd, &res, sizeof(res))) == -1)
+	if ((len = recvmsg(fd, &msg, MSG_CMSG_CLOEXEC)) == -1)
 		return -1;
 
-	/* in case of error, status message is returned */
-	if (len != sizeof(res)) {
-		memcpy(&status, &res, sizeof(status));
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	if (cmsg == NULL ||
+			cmsg->cmsg_level == IPPROTO_IP ||
+			cmsg->cmsg_type == IP_TTL) {
+		/* in case of error, status message is returned */
 		errno = bluealsa_status_to_errno(&status);
 		return -1;
 	}
@@ -317,29 +358,7 @@ int bluealsa_open_transport(int fd, const struct msg_transport *transport) {
 	if (read(fd, &status, sizeof(status)) == -1)
 		return -1;
 
-	debug("Opening PCM FIFO (mode: %s): %s",
-			req.stream == PCM_STREAM_PLAYBACK ? "WR" : "RO", res.fifo);
-	if ((pcm = open(res.fifo, req.stream == PCM_STREAM_PLAYBACK ?
-					O_WRONLY : O_RDONLY | O_NONBLOCK)) == -1)
-		return -1;
-
-	/* Restore the blocking mode. Non-blocking mode was required only for the
-	 * opening stage - FIFO read-write sides synchronization is done in the IO
-	 * thread. */
-	if (req.stream == PCM_STREAM_CAPTURE)
-		fcntl(pcm, F_SETFL, fcntl(pcm, F_GETFL) & ~O_NONBLOCK);
-
-	/* In the capture mode it is required to signal the server, that the PCM
-	 * opening process has been finished. This requirement comes from the fact,
-	 * that the writing side of the FIFO will not be opened before the reading
-	 * side is (if the write-only non-blocking mode is used). This "PCM ready"
-	 * signal will help to synchronize FIFO opening process. */
-	if (req.stream == PCM_STREAM_CAPTURE) {
-		req.command = COMMAND_PCM_READY;
-		bluealsa_send_request(fd, &req);
-	}
-
-	return pcm;
+	return *((int *)CMSG_DATA(cmsg));
 }
 
 /**

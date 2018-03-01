@@ -1,6 +1,6 @@
 /*
  * BlueALSA - ctl.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -32,7 +32,6 @@
 #include "hfp.h"
 #include "transport.h"
 #include "utils.h"
-#include "shared/ctl-proto.h"
 #include "shared/log.h"
 
 
@@ -204,15 +203,14 @@ static void ctl_thread_cmd_ping(const struct request *req, int fd) {
 	send(fd, &status, sizeof(status), MSG_NOSIGNAL);
 }
 
-static void ctl_thread_cmd_notifications(const struct request *req, int fd) {
+static void ctl_thread_cmd_subscribe(const struct request *req, int fd) {
 
 	static const struct msg_status status = { STATUS_CODE_SUCCESS };
-	const bool subscribe = req->command == COMMAND_SUBSCRIBE;
 	size_t i;
 
 	for (i = __CTL_IDX_MAX; i < __CTL_IDX_MAX + BLUEALSA_MAX_CLIENTS; i++)
 		if (config.ctl.pfds[i].fd == fd)
-			config.ctl.subs[i - __CTL_IDX_MAX] = subscribe;
+			config.ctl.subs[i - __CTL_IDX_MAX] = req->events;
 
 	send(fd, &status, sizeof(status), MSG_NOSIGNAL);
 }
@@ -313,17 +311,11 @@ fail:
 static void ctl_thread_cmd_pcm_open(const struct request *req, int fd) {
 
 	struct msg_status status = { STATUS_CODE_SUCCESS };
-	struct msg_pcm pcm;
 	struct ba_transport *t;
 	struct ba_pcm *t_pcm;
-	char addr[18];
+	int pipefd[2];
 
-	ba2str(&req->addr, addr);
-	snprintf(pcm.fifo, sizeof(pcm.fifo), BLUEALSA_RUN_STATE_DIR "/%s-%s-%u-%u",
-			config.hci_dev.name, addr, req->type, req->stream);
-	pcm.fifo[sizeof(pcm.fifo) - 1] = '\0';
-
-	debug("PCM requested for %s type %d stream %d", addr, req->type, req->stream);
+	debug("PCM requested for %s type %d stream %d", batostr_(&req->addr), req->type, req->stream);
 
 	pthread_mutex_lock(&config.devices_mutex);
 
@@ -337,35 +329,55 @@ static void ctl_thread_cmd_pcm_open(const struct request *req, int fd) {
 		goto final;
 	}
 
-	if (t_pcm->fifo != NULL) {
+	if (t_pcm->fd != -1) {
 		debug("PCM already requested: %d", t_pcm->fd);
 		status.code = STATUS_CODE_DEVICE_BUSY;
 		goto final;
 	}
 
-	_ctl_transport(t, &pcm.transport);
-
-	if (mkfifo(pcm.fifo, 0660) != 0) {
+	if (pipe(pipefd) == -1) {
 		error("Couldn't create FIFO: %s", strerror(errno));
 		status.code = STATUS_CODE_ERROR_UNKNOWN;
-		/* Jumping to the final section will prevent from unintentional removal
-		 * of the FIFO, which was not created by ourself. Cleanup action should
-		 * be applied to the stuff created in this function only. */
 		goto final;
 	}
 
-	/* During the mkfifo() call the FIFO mode is modified by the process umask,
-	 * so the post-creation correction is required. */
-	if (chmod(pcm.fifo, 0660) == -1)
-		goto fail;
-	if (chown(pcm.fifo, -1, config.gid_audio) == -1)
-		goto fail;
+	union {
+		char buf[CMSG_SPACE(sizeof(int))];
+		struct cmsghdr _align;
+	} control_un;
+	struct iovec io = { .iov_base = "", .iov_len = 1 };
+	struct msghdr msg = {
+		.msg_iov = &io,
+		.msg_iovlen = 1,
+		.msg_control = control_un.buf,
+		.msg_controllen = sizeof(control_un.buf),
+	};
 
-	/* XXX: This change will notify our sink IO thread, that the FIFO has just
-	 *      been created, so it is possible to open it. Source IO thread should
-	 *      not be started before the PCM open request has been made, so this
-	 *      "notification" mechanism does not apply. */
-	t_pcm->fifo = strdup(pcm.fifo);
+	struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+	cmsg->cmsg_level = SOL_SOCKET;
+	cmsg->cmsg_type = SCM_RIGHTS;
+	cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+	int *fdptr = (int *)CMSG_DATA(cmsg);
+
+	switch (req->stream) {
+	case PCM_STREAM_PLAYBACK:
+		t_pcm->fd = pipefd[0];
+		*fdptr = pipefd[1];
+		break;
+	case PCM_STREAM_CAPTURE:
+		t_pcm->fd = pipefd[1];
+		*fdptr = pipefd[0];
+		break;
+	case PCM_STREAM_DUPLEX:
+		debug("Invalid PCM stream type: %d", req->stream);
+		status.code = STATUS_CODE_ERROR_UNKNOWN;
+		goto fail;
+	}
+
+	/* XXX: This change will notify our sink (and SCO) IO thread, that the FIFO
+	 *      has just been created. Source IO thread should not be started before
+	 *      the PCM open request has been made, so this "notification" mechanism
+	 *      does not apply. */
 	eventfd_write(t->event_fd, 1);
 
 	/* A2DP source profile should be initialized (acquired) only if the audio
@@ -378,14 +390,17 @@ static void ctl_thread_cmd_pcm_open(const struct request *req, int fd) {
 			goto fail;
 		}
 
+	if (sendmsg(fd, &msg, 0) == -1)
+		goto fail;
+
 	t_pcm->client = fd;
-	send(fd, &pcm, sizeof(pcm), MSG_NOSIGNAL);
+	close(*fdptr);
 	goto final;
 
 fail:
-	free(t_pcm->fifo);
-	t_pcm->fifo = NULL;
-	unlink(pcm.fifo);
+	close(pipefd[0]);
+	close(pipefd[1]);
+	t_pcm->fd = -1;
 
 final:
 	pthread_mutex_unlock(&config.devices_mutex);
@@ -439,7 +454,7 @@ static void ctl_thread_cmd_pcm_control(const struct request *req, int fd) {
 		status.code = STATUS_CODE_ERROR_UNKNOWN;
 		goto fail;
 	}
-	if (t_pcm->fifo == NULL || t_pcm->client == -1) {
+	if (t_pcm->fd == -1 || t_pcm->client == -1) {
 		status.code = STATUS_CODE_ERROR_UNKNOWN;
 		goto fail;
 	}
@@ -458,8 +473,6 @@ static void ctl_thread_cmd_pcm_control(const struct request *req, int fd) {
 	case COMMAND_PCM_DRAIN:
 		transport_drain_pcm(t);
 		break;
-	case COMMAND_PCM_READY:
-		break;
 	default:
 		warn("Invalid PCM control command: %d", req->command);
 	}
@@ -476,8 +489,7 @@ static void *ctl_thread(void *arg) {
 
 	static void (*commands[__COMMAND_MAX])(const struct request *, int) = {
 		[COMMAND_PING] = ctl_thread_cmd_ping,
-		[COMMAND_SUBSCRIBE] = ctl_thread_cmd_notifications,
-		[COMMAND_UNSUBSCRIBE] = ctl_thread_cmd_notifications,
+		[COMMAND_SUBSCRIBE] = ctl_thread_cmd_subscribe,
 		[COMMAND_LIST_DEVICES] = ctl_thread_cmd_list_devices,
 		[COMMAND_LIST_TRANSPORTS] = ctl_thread_cmd_list_transports,
 		[COMMAND_TRANSPORT_GET] = ctl_thread_cmd_transport_get,
@@ -487,7 +499,6 @@ static void *ctl_thread(void *arg) {
 		[COMMAND_PCM_PAUSE] = ctl_thread_cmd_pcm_control,
 		[COMMAND_PCM_RESUME] = ctl_thread_cmd_pcm_control,
 		[COMMAND_PCM_DRAIN] = ctl_thread_cmd_pcm_control,
-		[COMMAND_PCM_READY] = ctl_thread_cmd_pcm_control,
 	};
 
 	debug("Starting controller loop");
@@ -533,7 +544,7 @@ static void *ctl_thread(void *arg) {
 					}
 
 					config.ctl.pfds[i].fd = -1;
-					config.ctl.subs[i - __CTL_IDX_MAX] = false;
+					config.ctl.subs[i - __CTL_IDX_MAX] = 0;
 					close(fd);
 					continue;
 				}
@@ -557,16 +568,16 @@ static void *ctl_thread(void *arg) {
 		/* generate notifications for subscribed clients */
 		if (config.ctl.pfds[CTL_IDX_EVT].revents & POLLIN) {
 
-			struct msg_event event = { EVENT_TYPE_NULL };
-			eventfd_t _event;
+			struct msg_event event = { 0 };
 			size_t i;
 
-			eventfd_read(config.ctl.pfds[CTL_IDX_EVT].fd, &_event);
+			if (read(config.ctl.pfds[CTL_IDX_EVT].fd, &event.mask, sizeof(event.mask)) == -1)
+				warn("Couldn't read controller event: %s", strerror(errno));
 
 			for (i = 0; i < BLUEALSA_MAX_CLIENTS; i++)
-				if (config.ctl.subs[i] == true) {
+				if (config.ctl.subs[i] & event.mask) {
 					const int client = config.ctl.pfds[i + __CTL_IDX_MAX].fd;
-					debug("Generating client notification: %d", client);
+					debug("Emitting notification: %B => %d", event.mask, client);
 					send(client, &event, sizeof(event), MSG_NOSIGNAL);
 				}
 
@@ -601,7 +612,7 @@ int bluealsa_ctl_thread_init(void) {
 
 	if (mkdir(BLUEALSA_RUN_STATE_DIR, 0755) == -1 && errno != EEXIST)
 		goto fail;
-	if ((config.ctl.pfds[CTL_IDX_SRV].fd = socket(PF_UNIX, SOCK_STREAM, 0)) == -1)
+	if ((config.ctl.pfds[CTL_IDX_SRV].fd = socket(PF_UNIX, SOCK_SEQPACKET, 0)) == -1)
 		goto fail;
 	if (bind(config.ctl.pfds[CTL_IDX_SRV].fd, (struct sockaddr *)(&saddr), sizeof(saddr)) == -1)
 		goto fail;
@@ -613,8 +624,9 @@ int bluealsa_ctl_thread_init(void) {
 	if (listen(config.ctl.pfds[CTL_IDX_SRV].fd, 2) == -1)
 		goto fail;
 
-	if ((config.ctl.pfds[CTL_IDX_EVT].fd = eventfd(0, EFD_NONBLOCK)) == -1)
+	if (pipe(config.ctl.evt) == -1)
 		goto fail;
+	config.ctl.pfds[CTL_IDX_EVT].fd = config.ctl.evt[0];
 
 	config.ctl.thread_created = true;
 	if ((errno = pthread_create(&config.ctl.thread, NULL, ctl_thread, NULL)) != 0) {
@@ -639,6 +651,10 @@ void bluealsa_ctl_free(void) {
 
 	config.ctl.thread_created = false;
 
+	close(config.ctl.evt[0]);
+	close(config.ctl.evt[1]);
+	config.ctl.pfds[CTL_IDX_EVT].fd = -1;
+
 	for (i = 0; i < sizeof(config.ctl.pfds) / sizeof(*config.ctl.pfds); i++)
 		if (config.ctl.pfds[i].fd != -1)
 			close(config.ctl.pfds[i].fd);
@@ -655,4 +671,8 @@ void bluealsa_ctl_free(void) {
 		config.ctl.socket_created = false;
 	}
 
+}
+
+int bluealsa_ctl_event(enum event event) {
+	return write(config.ctl.evt[1], &event, sizeof(event));
 }

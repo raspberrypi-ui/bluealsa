@@ -1,6 +1,6 @@
 /*
  * BlueALSA - io.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -43,64 +43,6 @@
 #include "shared/log.h"
 #include "shared/rt.h"
 
-
-/**
- * Open PCM for reading. */
-static int io_thread_open_pcm_read(struct ba_pcm *pcm) {
-
-	/* XXX: This check allows testing. During normal operation PCM FIFO
-	 *      should not be opened outside the IO thread function. */
-	if (pcm->fd == -1) {
-
-		debug("Opening FIFO for reading: %s", pcm->fifo);
-		/* this call will block until writing side is opened */
-		if ((pcm->fd = open(pcm->fifo, O_RDONLY)) == -1)
-			return -1;
-
-		/* Change FIFO reading mode to the non-blocking one. Since, our read
-		 * logic is based on poll(), non-blocking mode will allow incorporate
-		 * read timeout, which might be used for thread termination. */
-		fcntl(pcm->fd, F_SETFL, fcntl(pcm->fd, F_GETFL) | O_NONBLOCK);
-
-	}
-
-	return 0;
-}
-
-/**
- * Open PCM for writing. */
-static int io_thread_open_pcm_write(struct ba_pcm *pcm) {
-
-	/* transport PCM FIFO has not been requested */
-	if (pcm->fifo == NULL) {
-		errno = ENXIO;
-		return -1;
-	}
-
-	if (pcm->fd == -1) {
-
-		debug("Opening FIFO for writing: %s", pcm->fifo);
-		if ((pcm->fd = open(pcm->fifo, O_WRONLY | O_NONBLOCK)) == -1) {
-			debug("FIFO reading endpoint is not connected yet");
-			return -1;
-		}
-
-		/* Restore the blocking mode of our FIFO. Non-blocking mode was required
-		 * only for the opening process - we do not want to block if the reading
-		 * endpoint is not connected yet. On the other hand, blocking upon data
-		 * write will prevent frame dropping. */
-		fcntl(pcm->fd, F_SETFL, fcntl(pcm->fd, F_GETFL) & ~O_NONBLOCK);
-
-		/* In order to receive EPIPE while writing to the pipe whose reading end
-		 * is closed, the SIGPIPE signal has to be handled. For more information
-		 * see the io_thread_write_pcm() function. */
-		const struct sigaction sigact = { .sa_handler = SIG_IGN };
-		sigaction(SIGPIPE, &sigact, NULL);
-
-	}
-
-	return 0;
-}
 
 /**
  * Scale PCM signal according to the transport audio properties. */
@@ -177,6 +119,26 @@ static ssize_t io_thread_write_pcm(struct ba_pcm *pcm, const int16_t *buffer, si
 
 	/* It is guaranteed, that this function will write data atomically. */
 	return samples;
+}
+
+/**
+ * Write data to the BT SEQPACKET socket. */
+static ssize_t io_thread_write_bt(int fd, const uint8_t *buffer, size_t len) {
+
+	struct pollfd pfds[] = {{ fd, POLLOUT, 0 }};
+	ssize_t ret;
+
+retry:
+	if ((ret = write(fd, buffer, len)) == -1)
+		switch (errno) {
+		case EINTR:
+			goto retry;
+		case EAGAIN:
+			poll(pfds, sizeof(pfds) / sizeof(*pfds), -1);
+			goto retry;
+		}
+
+	return ret;
 }
 
 void *io_thread_a2dp_sink_sbc(void *arg) {
@@ -271,9 +233,8 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 			goto fail;
 		}
 
-		if (io_thread_open_pcm_write(&t->a2dp.pcm) == -1) {
-			if (errno != ENXIO)
-				error("Couldn't open FIFO: %s", strerror(errno));
+		if (t->a2dp.pcm.fd == -1) {
+			seq_number = -1;
 			continue;
 		}
 
@@ -377,11 +338,6 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 		goto fail;
 	}
 
-	if (io_thread_open_pcm_read(&t->a2dp.pcm) == -1) {
-		error("Couldn't open FIFO: %s", strerror(errno));
-		goto fail;
-	}
-
 	uint16_t seq_number = random();
 	uint32_t timestamp = random();
 
@@ -399,6 +355,7 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 	int16_t *in_buffer_tail = in_buffer;
 	size_t in_samples = in_buffer_size / sizeof(int16_t);
 
+	int poll_timeout = -1;
 	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
@@ -415,10 +372,10 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 		/* add PCM socket to the poll if transport is active */
 		pfds[1].fd = t->state == TRANSPORT_ACTIVE ? t->a2dp.pcm.fd : -1;
 
-		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), 100)) {
+		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), poll_timeout)) {
 		case 0:
-			if (t->a2dp.pcm.sync)
-				pthread_cond_signal(&t->a2dp.pcm.drained);
+			pthread_cond_signal(&t->a2dp.pcm.drained);
+			poll_timeout = -1;
 			continue;
 		case -1:
 			error("Transport poll error: %s", strerror(errno));
@@ -430,6 +387,8 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
 			asrs.frames = 0;
+			if (t->a2dp.pcm.sync)
+				poll_timeout = 100;
 			continue;
 		}
 
@@ -493,14 +452,18 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 			rtp_header->timestamp = htonl(timestamp);
 			rtp_payload->frame_count = sbc_frames;
 
-			if (write(t->bt_fd, out_buffer, output - out_buffer) == -1) {
+			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+			if (io_thread_write_bt(t->bt_fd, out_buffer, output - out_buffer) == -1) {
 				if (errno == ECONNRESET || errno == ENOTCONN) {
-					/* exit the thread upon BT socket disconnection */
-					debug("BT socket disconnected");
+					/* exit thread upon BT socket disconnection */
+					debug("BT socket disconnected: %d", t->bt_fd);
 					goto fail;
 				}
 				error("BT socket write error: %s", strerror(errno));
 			}
+
+			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
 			/* keep data transfer at a constant bit rate, also
 			 * get a timestamp for the next RTP frame */
@@ -638,9 +601,8 @@ void *io_thread_a2dp_sink_aac(void *arg) {
 			goto fail;
 		}
 
-		if (io_thread_open_pcm_write(&t->a2dp.pcm) == -1) {
-			if (errno != ENXIO)
-				error("Couldn't open FIFO: %s", strerror(errno));
+		if (t->a2dp.pcm.fd == -1) {
+			seq_number = -1;
 			continue;
 		}
 
@@ -832,15 +794,11 @@ void *io_thread_a2dp_source_aac(void *arg) {
 	/* helper variable used during payload fragmentation */
 	const size_t rtp_header_len = out_payload - out_buffer;
 
-	if (io_thread_open_pcm_read(&t->a2dp.pcm) == -1) {
-		error("Couldn't open FIFO: %s", strerror(errno));
-		goto fail;
-	}
-
 	/* initial input buffer tail and the available capacity */
 	size_t in_samples = in_buffer_size / in_buffer_element_size;
 	in_buffer_tail = in_buffer;
 
+	int poll_timeout = -1;
 	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
@@ -857,10 +815,10 @@ void *io_thread_a2dp_source_aac(void *arg) {
 		/* add PCM socket to the poll if transport is active */
 		pfds[1].fd = t->state == TRANSPORT_ACTIVE ? t->a2dp.pcm.fd : -1;
 
-		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), 100)) {
+		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), poll_timeout)) {
 		case 0:
-			if (t->a2dp.pcm.sync)
-				pthread_cond_signal(&t->a2dp.pcm.drained);
+			pthread_cond_signal(&t->a2dp.pcm.drained);
+			poll_timeout = -1;
 			continue;
 		case -1:
 			error("Transport poll error: %s", strerror(errno));
@@ -872,6 +830,8 @@ void *io_thread_a2dp_source_aac(void *arg) {
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
 			asrs.frames = 0;
+			if (t->a2dp.pcm.sync)
+				poll_timeout = 100;
 			continue;
 		}
 
@@ -926,15 +886,19 @@ void *io_thread_a2dp_source_aac(void *arg) {
 					rtp_header->markbit = len < payload_len_max;
 					rtp_header->seq_number = htons(++seq_number);
 
-					if ((ret = write(t->bt_fd, out_buffer, rtp_header_len + len)) == -1) {
+					pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+					if ((ret = io_thread_write_bt(t->bt_fd, out_buffer, rtp_header_len + len)) == -1) {
 						if (errno == ECONNRESET || errno == ENOTCONN) {
-							/* exit the thread upon BT socket disconnection */
-							debug("BT socket disconnected");
+							/* exit thread upon BT socket disconnection */
+							debug("BT socket disconnected: %d", t->bt_fd);
 							goto fail;
 						}
 						error("BT socket write error: %s", strerror(errno));
 						break;
 					}
+
+					pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
 					/* break if the last part of the payload has been written */
 					if ((payload_len -= ret - rtp_header_len) == 0)
@@ -1016,15 +980,11 @@ void *io_thread_a2dp_source_aptx(void *arg) {
 		goto fail;
 	}
 
-	if (io_thread_open_pcm_read(&t->a2dp.pcm) == -1) {
-		error("Couldn't open FIFO: %s", strerror(errno));
-		goto fail;
-	}
-
 	/* buffer tail position and available capacity */
 	int16_t *in_buffer_tail = in_buffer;
 	size_t in_samples = in_buffer_size / sizeof(int16_t);
 
+	int poll_timeout = -1;
 	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
@@ -1041,10 +1001,10 @@ void *io_thread_a2dp_source_aptx(void *arg) {
 		/* add PCM socket to the poll if transport is active */
 		pfds[1].fd = t->state == TRANSPORT_ACTIVE ? t->a2dp.pcm.fd : -1;
 
-		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), 100)) {
+		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), poll_timeout)) {
 		case 0:
-			if (t->a2dp.pcm.sync)
-				pthread_cond_signal(&t->a2dp.pcm.drained);
+			pthread_cond_signal(&t->a2dp.pcm.drained);
+			poll_timeout = -1;
 			continue;
 		case -1:
 			error("Transport poll error: %s", strerror(errno));
@@ -1056,6 +1016,8 @@ void *io_thread_a2dp_source_aptx(void *arg) {
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
 			asrs.frames = 0;
+			if (t->a2dp.pcm.sync)
+				poll_timeout = 100;
 			continue;
 		}
 
@@ -1113,14 +1075,18 @@ void *io_thread_a2dp_source_aptx(void *arg) {
 
 			}
 
-			if (write(t->bt_fd, out_buffer, output - out_buffer) == -1) {
+			pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+
+			if (io_thread_write_bt(t->bt_fd, out_buffer, output - out_buffer) == -1) {
 				if (errno == ECONNRESET || errno == ENOTCONN) {
-					/* exit the thread upon BT socket disconnection */
-					debug("BT socket disconnected");
+					/* exit thread upon BT socket disconnection */
+					debug("BT socket disconnected: %d", t->bt_fd);
 					goto fail;
 				}
 				error("BT socket write error: %s", strerror(errno));
 			}
+
+			pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
 			/* keep data transfer at a constant bit rate */
 			asrsync_sync(&asrs, pcm_frames);
@@ -1169,6 +1135,7 @@ void *io_thread_sco(void *arg) {
 		goto fail;
 	}
 
+	int poll_timeout = -1;
 	struct asrsync asrs = { .frames = 0 };
 	struct pollfd pfds[] = {
 		{ t->event_fd, POLLIN, 0 },
@@ -1192,23 +1159,23 @@ void *io_thread_sco(void *arg) {
 		switch (t->codec) {
 		case HFP_CODEC_CVSD:
 		default:
-			if (ffb_len_in(&bt_in) >= t->mtu_read)
+			if (t->mtu_read > 0 && ffb_len_in(&bt_in) >= t->mtu_read)
 				pfds[1].fd = t->bt_fd;
-			if (ffb_len_out(&bt_out) >= t->mtu_write)
+			if (t->mtu_write > 0 && ffb_len_out(&bt_out) >= t->mtu_write)
 				pfds[2].fd = t->bt_fd;
-			if (ffb_len_in(&bt_out) >= t->mtu_write)
+			if (t->mtu_write > 0 && ffb_len_in(&bt_out) >= t->mtu_write)
 				pfds[3].fd = t->sco.spk_pcm.fd;
-			if (ffb_len_out(&bt_in) >= t->mtu_read)
+			if (ffb_len_out(&bt_in) > 0)
 				pfds[4].fd = t->sco.mic_pcm.fd;
 		}
 
 		if (t->sco.mic_pcm.fd == -1)
 			pfds[1].fd = -1;
 
-		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), 100)) {
+		switch (poll(pfds, sizeof(pfds) / sizeof(*pfds), poll_timeout)) {
 		case 0:
-			if (t->sco.spk_pcm.sync)
-				pthread_cond_signal(&t->sco.spk_pcm.drained);
+			pthread_cond_signal(&t->sco.spk_pcm.drained);
+			poll_timeout = -1;
 			continue;
 		case -1:
 			error("Transport poll error: %s", strerror(errno));
@@ -1223,10 +1190,14 @@ void *io_thread_sco(void *arg) {
 			eventfd_t event;
 			eventfd_read(pfds[0].fd, &event);
 
-			/* Try to open reading and/or writing PCM file descriptor. Note,
-			 * that we are not checking for errors, because we don't care. */
-			io_thread_open_pcm_read(&t->sco.spk_pcm);
-			io_thread_open_pcm_write(&t->sco.mic_pcm);
+			/* FIXME: Drain functionality for speaker.
+			 * XXX: Right now it is not possible to drain speaker PCM (in a clean
+			 *      fashion), because poll() will not timeout if we've got incoming
+			 *      data from the microphone (BT SCO socket). In order not to hang
+			 *      forever in the transport_drain_pcm() function, we will signal
+			 *      PCM drain right now. */
+			if (t->sco.spk_pcm.sync)
+				pthread_cond_signal(&t->sco.spk_pcm.drained);
 
 			const enum hfp_ind *inds = t->sco.rfcomm->rfcomm.hfp_inds;
 			bool release = false;
@@ -1295,7 +1266,7 @@ retry_sco_read:
 
 		}
 		else if (pfds[1].revents & (POLLERR | POLLHUP)) {
-			debug("SCO poll error status: 0x%x", pfds[1].revents);
+			debug("SCO poll error status: %#x", pfds[1].revents);
 			transport_release_bt_sco(t);
 		}
 
@@ -1368,7 +1339,9 @@ retry_sco_write:
 
 		}
 		else if (pfds[3].revents & (POLLERR | POLLHUP)) {
-			debug("PCM poll error status: 0x%x", pfds[3].revents);
+			debug("PCM poll error status: %#x", pfds[3].revents);
+			close(t->sco.spk_pcm.fd);
+			t->sco.spk_pcm.fd = -1;
 		}
 
 		if (pfds[4].revents & POLLOUT) {

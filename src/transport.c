@@ -1,6 +1,6 @@
 /*
  * BlueALSA - transport.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -12,7 +12,6 @@
 #include "transport.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -28,6 +27,7 @@
 
 #include "a2dp-codecs.h"
 #include "bluealsa.h"
+#include "ctl.h"
 #include "hfp.h"
 #include "io.h"
 #include "rfcomm.h"
@@ -196,7 +196,7 @@ bool device_remove(GHashTable *devices, const char *key) {
 void device_set_battery_level(struct ba_device *d, uint8_t value) {
 	d->battery.enabled = true;
 	d->battery.level = value;
-	bluealsa_event();
+	bluealsa_ctl_event(EVENT_UPDATE_BATTERY);
 }
 
 /**
@@ -288,7 +288,7 @@ struct ba_transport *transport_new_a2dp(
 	pthread_cond_init(&t->a2dp.pcm.drained, NULL);
 	pthread_mutex_init(&t->a2dp.pcm.drained_mn, NULL);
 
-	bluealsa_event();
+	bluealsa_ctl_event(EVENT_TRANSPORT_ADDED);
 	return t;
 }
 
@@ -328,7 +328,7 @@ struct ba_transport *transport_new_rfcomm(
 
 	transport_set_state(t_sco, TRANSPORT_ACTIVE);
 
-	bluealsa_event();
+	bluealsa_ctl_event(EVENT_TRANSPORT_ADDED);
 	return t;
 
 fail:
@@ -394,7 +394,7 @@ void transport_free(struct ba_transport *t) {
 	 * removed anyway. */
 	g_hash_table_steal(t->device->transports, t->dbus_path);
 
-	bluealsa_event();
+	bluealsa_ctl_event(EVENT_TRANSPORT_REMOVED);
 
 	free(t->dbus_owner);
 	free(t->dbus_path);
@@ -450,9 +450,16 @@ bool transport_remove(GHashTable *devices, const char *dbus_path) {
 
 	GHashTableIter iter;
 	struct ba_device *d;
+	struct ba_transport *t;
 
 	g_hash_table_iter_init(&iter, devices);
 	while (g_hash_table_iter_next(&iter, NULL, (gpointer)&d)) {
+		/* Disassociate D-Bus owner before further actions. This will ensure,
+		 * that we will not generate errors by using non-existent interface. */
+		if ((t = g_hash_table_lookup(d->transports, dbus_path)) != NULL) {
+			free(t->dbus_owner);
+			t->dbus_owner = NULL;
+		}
 		if (g_hash_table_remove(d->transports, dbus_path)) {
 			if (g_hash_table_size(d->transports) == 0)
 				g_hash_table_iter_remove(&iter);
@@ -614,7 +621,7 @@ unsigned int transport_get_sampling(const struct ba_transport *t) {
 			case HFP_CODEC_MSBC:
 				return 16000;
 			default:
-				debug("Unsupported SCO codec: 0x%x", t->codec);
+				debug("Unsupported SCO codec: %#x", t->codec);
 		}
 	}
 
@@ -686,11 +693,14 @@ int transport_set_state(struct ba_transport *t, enum ba_transport_state state) {
 		if (created) {
 			pthread_cancel(t->thread);
 			ret = pthread_join(t->thread, NULL);
-			t->thread = config.main_thread;
 		}
 		break;
 	case TRANSPORT_PENDING:
-		ret = transport_acquire_bt_a2dp(t);
+		/* When transport is marked as pending, try to acquire transport, but only
+		 * if we are handing A2DP sink profile. For source profile, transport has
+		 * to be acquired by our controller (during the PCM open request). */
+		if (t->profile == BLUETOOTH_PROFILE_A2DP_SINK)
+			ret = transport_acquire_bt_a2dp(t);
 		break;
 	case TRANSPORT_ACTIVE:
 	case TRANSPORT_PAUSED:
@@ -750,6 +760,7 @@ int transport_drain_pcm(struct ba_transport *t) {
 	pthread_mutex_lock(&pcm->drained_mn);
 
 	pcm->sync = true;
+	eventfd_write(t->event_fd, 1);
 	pthread_cond_wait(&pcm->drained, &pcm->drained_mn);
 	pcm->sync = false;
 
@@ -802,12 +813,10 @@ int transport_acquire_bt_a2dp(struct ba_transport *t) {
 
 	/* Minimize audio delay and increase responsiveness (seeking, stopping) by
 	 * decreasing the BT socket output buffer. We will use a tripled write MTU
-	 * value, in order to prevent tearing due to temporal heavy load. Also,
-	 * make socket IO blocking, so we won't bother about partial writes. */
+	 * value, in order to prevent tearing due to temporal heavy load. */
 	size_t size = t->mtu_write * 3;
 	if (setsockopt(t->bt_fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(size)) == -1)
 		warn("Couldn't set socket output buffer size: %s", strerror(errno));
-	fcntl(t->bt_fd, F_SETFL, fcntl(t->bt_fd, F_GETFL) & ~O_NONBLOCK);
 
 	debug("New transport: %d (MTU: R:%zu W:%zu)", t->bt_fd, t->mtu_read, t->mtu_write);
 
@@ -838,9 +847,9 @@ int transport_release_bt_a2dp(struct ba_transport *t) {
 			bluetooth_profile_to_string(t->profile, t->codec));
 
 	/* If the state is idle, it means that either transport was not acquired, or
-	 * was released by the Bluez. In both cases there is no point in a explicit
+	 * was released by the BlueZ. In both cases there is no point in a explicit
 	 * release request. It might even return error (e.g. not authorized). */
-	if (t->state != TRANSPORT_IDLE) {
+	if (t->state != TRANSPORT_IDLE && t->dbus_owner != NULL) {
 
 		msg = g_dbus_message_new_method_call(t->dbus_owner, t->dbus_path,
 				"org.bluez.MediaTransport1", "Release");
@@ -852,7 +861,7 @@ int transport_release_bt_a2dp(struct ba_transport *t) {
 		if (g_dbus_message_get_message_type(rep) == G_DBUS_MESSAGE_TYPE_ERROR) {
 			g_dbus_message_to_gerror(rep, &err);
 			if (err->code == G_DBUS_ERROR_NO_REPLY) {
-				/* If Bluez is already terminated (or is terminating), we won't receive
+				/* If BlueZ is already terminated (or is terminating), we won't receive
 				 * any response. Do not treat such a case as an error - omit logging. */
 				g_error_free(err);
 				err = NULL;
@@ -955,17 +964,10 @@ int transport_release_pcm(struct ba_pcm *pcm) {
 	/* Transport IO workers are managed using thread cancellation mechanism,
 	 * so we have to take into account a possibility of cancellation during the
 	 * execution. In this release function it is important to perform actions
-	 * atomically. Since unlink and close calls are cancellation points, it is
-	 * required to temporally disable cancellation. For a better understanding
-	 * of what is going on, see the io_thread_read_pcm() function. */
+	 * atomically. Since close call is a cancellation point, it is required to
+	 * temporally disable cancellation. For a better understanding of what is
+	 * going on, see the io_thread_read_pcm() function. */
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
-
-	if (pcm->fifo != NULL) {
-		debug("Cleaning PCM FIFO: %s", pcm->fifo);
-		unlink(pcm->fifo);
-		free(pcm->fifo);
-		pcm->fifo = NULL;
-	}
 
 	if (pcm->fd != -1) {
 		debug("Closing PCM: %d", pcm->fd);
@@ -987,6 +989,10 @@ void transport_pthread_cleanup(void *arg) {
 	 * are closed in it. */
 	if (t->release != NULL)
 		t->release(t);
+
+	/* Make sure, that after termination, this thread handler will not
+	 * be used anymore. */
+	t->thread = config.main_thread;
 
 	/* XXX: If the order of the cleanup push is right, this function will
 	 *      indicate the end of the IO/RFCOMM thread. */

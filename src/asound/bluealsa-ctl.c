@@ -1,6 +1,6 @@
 /*
  * bluealsa-ctl.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -50,6 +50,9 @@ struct bluealsa_ctl {
 
 	/* bluealsa socket */
 	int fd;
+
+	/* if true, show battery meter */
+	bool battery;
 
 	/* list of all BT devices */
 	struct msg_device *devices;
@@ -240,7 +243,7 @@ static int bluealsa_elem_count(snd_ctl_ext_t *ext) {
 
 	for (i = 0; i < ctl->devices_count; i++) {
 		/* add additional element for battery level */
-		if (ctl->devices[i].battery)
+		if (ctl->battery && ctl->devices[i].battery)
 			count++;
 	}
 
@@ -346,7 +349,7 @@ static int bluealsa_elem_count(snd_ctl_ext_t *ext) {
 	/* construct device specific elements */
 	for (i = 0; i < ctl->devices_count; i++) {
 		/* add additional element for battery level */
-		if (ctl->devices[i].battery) {
+		if (ctl->battery && ctl->devices[i].battery) {
 			ctl->elems[count].type = CTL_ELEM_TYPE_BATTERY;
 			ctl->elems[count].device = &ctl->devices[i];
 			ctl->elems[count].transport = NULL;
@@ -536,23 +539,11 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 	if (key > ctl->elems_count)
 		return -EINVAL;
 
-	struct msg_status status;
 	struct ctl_elem *elem = &ctl->elems[key];
 	struct msg_transport *transport = elem->transport;
 
 	if (transport == NULL)
 		return -EINVAL;
-
-	struct request req = {
-		.command = COMMAND_TRANSPORT_SET_VOLUME,
-		.addr = transport->addr,
-		.stream = transport->stream,
-		.type = transport->type,
-		.ch1_muted = transport->ch1_muted,
-		.ch1_volume = transport->ch1_volume,
-		.ch2_muted = transport->ch2_muted,
-		.ch2_volume = transport->ch2_volume,
-	};
 
 	switch (elem->type) {
 	case CTL_ELEM_TYPE_BATTERY:
@@ -563,15 +554,15 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 		case PCM_TYPE_NULL:
 			return -EINVAL;
 		case PCM_TYPE_A2DP:
-			req.ch1_muted = transport->ch1_muted = !value[0];
+			transport->ch1_muted = !value[0];
 			if (transport->channels == 2)
-				req.ch2_muted = transport->ch2_muted = !value[1];
+				transport->ch2_muted = !value[1];
 			break;
 		case PCM_TYPE_SCO:
 			if (elem->playback)
-				req.ch1_muted = transport->ch1_muted = !value[0];
+				transport->ch1_muted = !value[0];
 			else
-				req.ch2_muted = transport->ch2_muted = !value[0];
+				transport->ch2_muted = !value[0];
 			break;
 		}
 		break;
@@ -580,30 +571,30 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 		case PCM_TYPE_NULL:
 			return -EINVAL;
 		case PCM_TYPE_A2DP:
-			req.ch1_volume = transport->ch1_volume = value[0];
+			transport->ch1_volume = value[0];
 			if (transport->channels == 2)
-				req.ch2_volume = transport->ch2_volume = value[1];
+				transport->ch2_volume = value[1];
 			break;
 		case PCM_TYPE_SCO:
 			if (elem->playback)
-				req.ch1_volume = transport->ch1_volume = value[0];
+				transport->ch1_volume = value[0];
 			else
-				req.ch2_volume = transport->ch2_volume = value[0];
+				transport->ch2_volume = value[0];
 			break;
 		}
 		break;
 	}
 
-	send(ctl->fd, &req, sizeof(req), MSG_NOSIGNAL);
-	if (read(ctl->fd, &status, sizeof(status)) == -1)
-		return -EIO;
-
+	if (bluealsa_set_transport_volume(ctl->fd, transport,
+				transport->ch1_muted, transport->ch1_volume,
+				transport->ch2_muted, transport->ch2_volume) == -1)
+		return -errno;
 	return 0;
 }
 
 static void bluealsa_subscribe_events(snd_ctl_ext_t *ext, int subscribe) {
 	struct bluealsa_ctl *ctl = (struct bluealsa_ctl *)ext->private_data;
-	if (bluealsa_subscribe(ctl->fd, subscribe) == -1)
+	if (bluealsa_subscribe(ctl->fd, subscribe ? 0xFFFF : 0) == -1)
 		SNDERR("BlueALSA subscription failed: %s", strerror(errno));
 }
 
@@ -718,6 +709,7 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 
 	snd_config_iterator_t i, next;
 	const char *interface = "hci0";
+	const char *battery = "no";
 	struct bluealsa_ctl *ctl;
 	int ret;
 
@@ -735,6 +727,13 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 
 		if (strcmp(id, "interface") == 0) {
 			if (snd_config_get_string(n, &interface) < 0) {
+				SNDERR("Invalid type for %s", id);
+				return -EINVAL;
+			}
+			continue;
+		}
+		if (strcmp(id, "battery") == 0) {
+			if (snd_config_get_string(n, &battery) < 0) {
 				SNDERR("Invalid type for %s", id);
 				return -EINVAL;
 			}
@@ -761,6 +760,7 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 	strncpy(ctl->ext.name, "BlueALSA", sizeof(ctl->ext.name) - 1);
 	strncpy(ctl->ext.longname, "Bluetooth Audio Hub Controller", sizeof(ctl->ext.longname) - 1);
 	strncpy(ctl->ext.mixername, "BlueALSA Plugin", sizeof(ctl->ext.mixername) - 1);
+	ctl->battery = strcmp(battery, "yes") == 0;
 
 	ctl->ext.callback = &bluealsa_snd_ctl_ext_callback;
 	ctl->ext.private_data = ctl;

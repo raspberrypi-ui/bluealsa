@@ -1,6 +1,6 @@
 /*
  * test-server.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -53,8 +53,10 @@ static void test_pcm_setup_free(void) {
 	bluealsa_config_free();
 }
 
+static bool main_loop_on = true;
 static void test_pcm_setup_free_handler(int sig) {
 	(void)(sig);
+	main_loop_on = false;
 	test_pcm_setup_free();
 }
 
@@ -75,11 +77,9 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 	int16_t buffer[1024 * 2];
 	int x = 0;
 
-	for (;;) {
+	while (test_sigusr1_count == 0) {
 
-		if (io_thread_open_pcm_write(&t->a2dp.pcm) == -1) {
-			if (errno != ENXIO)
-				error("Couldn't open FIFO: %s", strerror(errno));
+		if (t->a2dp.pcm.fd == -1) {
 			usleep(10000);
 			continue;
 		}
@@ -98,20 +98,21 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 		asrsync_sync(&asrs, samples / 2);
 	}
 
+	transport_release_pcm(&t->a2dp.pcm);
 	return NULL;
 }
 
 void *io_thread_a2dp_source_sbc(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
-	while ((t->a2dp.pcm.fd = open(t->a2dp.pcm.fifo, O_RDONLY)) == -1)
+	while (t->a2dp.pcm.fd == -1)
 		usleep(10000);
 
 	struct asrsync asrs = { .frames = 0 };
 	int16_t buffer[1024 * 2];
 	ssize_t samples;
 
-	for (;;) {
+	while (test_sigusr2_count == 0) {
 		fprintf(stderr, ".");
 
 		if (asrs.frames == 0)
@@ -127,6 +128,7 @@ void *io_thread_a2dp_source_sbc(void *arg) {
 		asrsync_sync(&asrs, samples / 2);
 	}
 
+	transport_release_pcm(&t->a2dp.pcm);
 	return NULL;
 }
 
@@ -180,6 +182,11 @@ int main(int argc, char *argv[]) {
 	sigaction(SIGTERM, &sigact, NULL);
 	atexit(test_pcm_setup_free);
 
+	/* register USR signals handler */
+	sigact.sa_handler = test_sigusr_handler;
+	sigaction(SIGUSR1, &sigact, NULL);
+	sigaction(SIGUSR2, &sigact, NULL);
+
 	bdaddr_t addr;
 	struct ba_device *d1, *d2;
 
@@ -211,6 +218,8 @@ int main(int argc, char *argv[]) {
 		assert(transport_acquire_bt_a2dp(t) == 0);
 	}
 
-	sleep(timeout);
+	while (timeout != 0 && main_loop_on)
+		timeout = sleep(timeout);
+
 	return EXIT_SUCCESS;
 }
