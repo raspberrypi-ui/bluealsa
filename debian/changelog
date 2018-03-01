@@ -1,3 +1,9 @@
+bluealsa (0.7) stretch; urgency=medium
+
+  * Merge in recent changes to original bluezalsa; enable for CLI boot
+
+ -- Simon Long <simon@raspberrypi.org>  Thu, 01 Mar 2018 08:46:26 +0000
+
 bluealsa (0.6) stretch; urgency=medium
 
   * Merge in recent changes to original bluezalsa, including fix for audio truncation

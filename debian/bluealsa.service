@@ -9,4 +9,4 @@ User=root
 ExecStart=/usr/bin/bluealsa
 
 [Install]
-WantedBy=graphical.target
+WantedBy=multi-user.target
