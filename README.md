@@ -42,6 +42,10 @@ Dependencies:
 - [fdk-aac](https://github.com/mstorsjo/fdk-aac) (when AAC support is enabled with `--enable-aac`)
 - [openaptx](https://github.com/Arkq/openaptx) (when apt-X support is enabled with `--enable-aptx`)
 
+Dependencies for `bluealsa-rfcomm` (when `--enable-rfcomm` is specified during configuration):
+
+- [readline](https://tiswww.case.edu/php/chet/readline/rltop.html)
+
 Dependencies for `hcitop` (when `--enable-hcitop` is specified during configuration):
 
 - [libbsd](https://libbsd.freedesktop.org/)
@@ -123,16 +127,6 @@ Troubleshooting
 	LIBASOUND_THREAD_SAFE=0`. Just take a look at involved
 	[hacks](http://git.alsa-project.org/?p=alsa-lib.git;a=blob;f=src/pcm/pcm_ioplug.c;h=1dc198e7c99c933264fa25c9d7dbac5153bf0860;hb=1bf144013cffdeb41a5df3a11a8eb2596c5ea2b5#l682)
 	(search for "to avoid deadlock" comments) and decide for yourself.
-
-3. AAC encoding.
-
-	If connected Bluetooth headset supports AAC and BlueALSA was compiled with AAC (`./configure
-	--enable-aac`) such an encoder will be used for A2DP profile. However, AAC encoding is
-	buggy - sorry for that. If the encoded packet size exceeds writing MTU, fragmentation occurs,
-	which is not handled correctly. As a workaround, it is possible to decrease packet size by
-	degrading audio quality via the `--aac-vbr-mode=NB` option.
-
-	This bug is tracked via [this](https://github.com/Arkq/bluez-alsa/issues/10) issue.
 
 
 Resources

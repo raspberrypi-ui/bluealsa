@@ -67,7 +67,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 
 		a2dp_sbc_t *cap = (a2dp_sbc_t *)capabilities;
 
-		if (config.a2dp_force_44100 &&
+		if (config.a2dp.force_44100 &&
 				cap->frequency & SBC_SAMPLING_FREQ_44100)
 			cap->frequency = SBC_SAMPLING_FREQ_44100;
 		else if (cap->frequency & SBC_SAMPLING_FREQ_48000)
@@ -83,7 +83,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 			goto fail;
 		}
 
-		if (config.a2dp_force_mono &&
+		if (config.a2dp.force_mono &&
 				cap->channel_mode & SBC_CHANNEL_MODE_MONO)
 			cap->channel_mode = SBC_CHANNEL_MODE_MONO;
 		else if (cap->channel_mode & SBC_CHANNEL_MODE_JOINT_STEREO)
@@ -131,7 +131,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 		}
 
 		int bitpool = a2dp_sbc_default_bitpool(cap->frequency, cap->channel_mode);
-		cap->min_bitpool = MAX(MIN_BITPOOL, cap->min_bitpool);
+		cap->min_bitpool = MAX(SBC_MIN_BITPOOL, cap->min_bitpool);
 		cap->max_bitpool = MIN(bitpool, cap->max_bitpool);
 
 		break;
@@ -161,7 +161,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 		}
 
 		unsigned int sampling = AAC_GET_FREQUENCY(*cap);
-		if (config.a2dp_force_44100 &&
+		if (config.a2dp.force_44100 &&
 				sampling & AAC_SAMPLING_FREQ_44100)
 			AAC_SET_FREQUENCY(*cap, AAC_SAMPLING_FREQ_44100);
 		else if (sampling & AAC_SAMPLING_FREQ_96000)
@@ -193,7 +193,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 			goto fail;
 		}
 
-		if (config.a2dp_force_mono &&
+		if (config.a2dp.force_mono &&
 				cap->channels & AAC_CHANNELS_1)
 			cap->channels = AAC_CHANNELS_1;
 		else if (cap->channels & AAC_CHANNELS_2)
@@ -219,7 +219,7 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 
 		a2dp_aptx_t *cap = (a2dp_aptx_t *)capabilities;
 
-		if (config.a2dp_force_44100 &&
+		if (config.a2dp.force_44100 &&
 				cap->frequency & APTX_SAMPLING_FREQ_44100)
 			cap->frequency = APTX_SAMPLING_FREQ_44100;
 		else if (cap->frequency & APTX_SAMPLING_FREQ_48000)
@@ -235,12 +235,8 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 			goto fail;
 		}
 
-		if (cap->channel_mode & APTX_CHANNEL_MODE_JOINT_STEREO)
-			cap->channel_mode = APTX_CHANNEL_MODE_JOINT_STEREO;
-		else if (cap->channel_mode & APTX_CHANNEL_MODE_STEREO)
+		if (cap->channel_mode & APTX_CHANNEL_MODE_STEREO)
 			cap->channel_mode = APTX_CHANNEL_MODE_STEREO;
-		else if (cap->channel_mode & APTX_CHANNEL_MODE_DUAL_CHANNEL)
-			cap->channel_mode = APTX_CHANNEL_MODE_DUAL_CHANNEL;
 		else {
 			error("No supported channel modes: %#x", cap->channel_mode);
 			goto fail;
@@ -257,13 +253,16 @@ static void bluez_endpoint_select_configuration(GDBusMethodInvocation *inv, void
 		goto final;
 	}
 
-	GVariantBuilder *caps = g_variant_builder_new(G_VARIANT_TYPE("ay"));
+	GVariantBuilder caps;
 	size_t i;
 
+	g_variant_builder_init(&caps, G_VARIANT_TYPE("ay"));
 	for (i = 0; i < size; i++)
-		g_variant_builder_add(caps, "y", capabilities[i]);
+		g_variant_builder_add(&caps, "y", capabilities[i]);
 
-	g_dbus_method_invocation_return_value(inv, g_variant_new("(ay)", caps));
+	g_dbus_method_invocation_return_value(inv, g_variant_new("(ay)", &caps));
+	g_variant_builder_clear(&caps);
+
 	goto final;
 
 fail:
@@ -460,9 +459,7 @@ static int bluez_endpoint_set_configuration(GDBusMethodInvocation *inv, void *us
 					goto fail;
 				}
 
-				if (cap->channel_mode != APTX_CHANNEL_MODE_DUAL_CHANNEL &&
-						cap->channel_mode != APTX_CHANNEL_MODE_STEREO &&
-						cap->channel_mode != APTX_CHANNEL_MODE_JOINT_STEREO) {
+				if (cap->channel_mode != APTX_CHANNEL_MODE_STEREO) {
 					error("Invalid configuration: %s", "Invalid channel mode");
 					goto fail;
 				}
@@ -537,8 +534,10 @@ static int bluez_endpoint_set_configuration(GDBusMethodInvocation *inv, void *us
 	t->a2dp.ch2_volume = volume;
 	t->a2dp.delay = delay;
 
-	debug("%s configured for device %s",
-			bluetooth_profile_to_string(profile, codec), batostr_(&d->addr));
+	debug("%s (%s) configured for device %s",
+			bluetooth_profile_to_string(profile),
+			bluetooth_a2dp_codec_to_string(codec),
+			batostr_(&d->addr));
 	debug("Configuration: channels: %u, sampling: %u",
 			transport_get_channels(t), transport_get_sampling(t));
 
@@ -644,19 +643,15 @@ static const GDBusInterfaceVTable endpoint_vtable = {
  * @param uuid
  * @param profile
  * @param codec
- * @param configuration
- * @param configuration_size
  * @return On success this function returns 0. Otherwise -1 is returned. */
 static int bluez_register_a2dp_endpoint(
 		const char *uuid,
 		enum bluetooth_profile profile,
-		uint16_t codec,
-		const void *configuration,
-		size_t configuration_size) {
+		const struct bluez_a2dp_codec *codec) {
 
 	gchar *path = g_strdup_printf("%s/%d",
-		g_dbus_get_profile_object_path(profile, codec),
-		bluez_get_dbus_object_count(profile, codec) + 1);
+		g_dbus_get_profile_object_path(profile, codec->id),
+		bluez_get_dbus_object_count(profile, codec->id) + 1);
 	gpointer hash = GINT_TO_POINTER(g_str_hash(path));
 
 	if (g_hash_table_contains(config.dbus_objects, hash)) {
@@ -674,7 +669,7 @@ static int bluez_register_a2dp_endpoint(
 
 	struct ba_dbus_object dbus_object = {
 		.profile = profile,
-		.codec = codec,
+		.codec = codec->id,
 	};
 
 	debug("Registering endpoint: %s", path);
@@ -687,17 +682,21 @@ static int bluez_register_a2dp_endpoint(
 	msg = g_dbus_message_new_method_call("org.bluez", dev,
 			"org.bluez.Media1", "RegisterEndpoint");
 
-	GVariantBuilder *properties = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
-	GVariantBuilder *caps = g_variant_builder_new(G_VARIANT_TYPE("ay"));
+	GVariantBuilder caps;
+	GVariantBuilder properties;
 
-	for (i = 0; i < configuration_size; i++)
-		g_variant_builder_add(caps, "y", ((uint8_t *)configuration)[i]);
+	g_variant_builder_init(&caps, G_VARIANT_TYPE("ay"));
+	g_variant_builder_init(&properties, G_VARIANT_TYPE("a{sv}"));
 
-	g_variant_builder_add(properties, "{sv}", "UUID", g_variant_new_string(uuid));
-	g_variant_builder_add(properties, "{sv}", "Codec", g_variant_new_byte(codec));
-	g_variant_builder_add(properties, "{sv}", "Capabilities", g_variant_new("ay", caps));
+	for (i = 0; i < codec->cfg_size; i++)
+		g_variant_builder_add(&caps, "y", ((uint8_t *)codec->cfg)[i]);
 
-	g_dbus_message_set_body(msg, g_variant_new("(oa{sv})", path, properties));
+	g_variant_builder_add(&properties, "{sv}", "UUID", g_variant_new_string(uuid));
+	g_variant_builder_add(&properties, "{sv}", "Codec", g_variant_new_byte(codec->id));
+	g_variant_builder_add(&properties, "{sv}", "Capabilities", g_variant_builder_end(&caps));
+
+	g_dbus_message_set_body(msg, g_variant_new("(oa{sv})", path, &properties));
+	g_variant_builder_clear(&properties);
 
 	if ((rep = g_dbus_connection_send_message_with_reply_sync(conn, msg,
 					G_DBUS_SEND_MESSAGE_FLAGS_NONE, -1, NULL, NULL, &err)) == NULL)
@@ -736,22 +735,23 @@ final:
 /**
  * Register A2DP endpoints. */
 void bluez_register_a2dp(void) {
-	if (!config.enable_a2dp)
-		return;
-#if ENABLE_AAC
-	bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SOURCE, BLUETOOTH_PROFILE_A2DP_SOURCE,
-			A2DP_CODEC_MPEG24, &bluez_a2dp_aac, sizeof(bluez_a2dp_aac));
-	bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SINK, BLUETOOTH_PROFILE_A2DP_SINK,
-			A2DP_CODEC_MPEG24, &bluez_a2dp_aac, sizeof(bluez_a2dp_aac));
-#endif
-#if ENABLE_APTX
-	bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SOURCE, BLUETOOTH_PROFILE_A2DP_SOURCE,
-			A2DP_CODEC_VENDOR_APTX, &bluez_a2dp_aptx, sizeof(bluez_a2dp_aptx));
-#endif
-	bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SOURCE, BLUETOOTH_PROFILE_A2DP_SOURCE,
-			A2DP_CODEC_SBC, &bluez_a2dp_sbc, sizeof(bluez_a2dp_sbc));
-	bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SINK, BLUETOOTH_PROFILE_A2DP_SINK,
-			A2DP_CODEC_SBC, &bluez_a2dp_sbc, sizeof(bluez_a2dp_sbc));
+
+	const struct bluez_a2dp_codec **cc = config.a2dp.codecs;
+
+	while (*cc != NULL) {
+		const struct bluez_a2dp_codec *c = *cc++;
+		switch (c->dir) {
+		case BLUEZ_A2DP_SOURCE:
+			if (config.enable.a2dp_source)
+				bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SOURCE, BLUETOOTH_PROFILE_A2DP_SOURCE, c);
+			break;
+		case BLUEZ_A2DP_SINK:
+			if (config.enable.a2dp_sink)
+				bluez_register_a2dp_endpoint(BLUETOOTH_UUID_A2DP_SINK, BLUETOOTH_PROFILE_A2DP_SINK, c);
+			break;
+		}
+	}
+
 }
 
 static void bluez_profile_new_connection(GDBusMethodInvocation *inv, void *userdata) {
@@ -794,7 +794,7 @@ static void bluez_profile_new_connection(GDBusMethodInvocation *inv, void *userd
 	t->release = transport_release_bt_rfcomm;
 
 	debug("%s configured for device %s",
-			bluetooth_profile_to_string(profile, -1), batostr_(&d->addr));
+			bluetooth_profile_to_string(profile), batostr_(&d->addr));
 
 	transport_set_state(t, TRANSPORT_ACTIVE);
 
@@ -916,14 +916,16 @@ static int bluez_register_profile(
 	msg = g_dbus_message_new_method_call("org.bluez", "/org/bluez",
 			"org.bluez.ProfileManager1", "RegisterProfile");
 
-	GVariantBuilder *options = g_variant_builder_new(G_VARIANT_TYPE("a{sv}"));
+	GVariantBuilder options;
 
+	g_variant_builder_init(&options, G_VARIANT_TYPE("a{sv}"));
 	if (version)
-		g_variant_builder_add(options, "{sv}", "Version", g_variant_new_uint16(version));
+		g_variant_builder_add(&options, "{sv}", "Version", g_variant_new_uint16(version));
 	if (features)
-		g_variant_builder_add(options, "{sv}", "Features", g_variant_new_uint16(features));
+		g_variant_builder_add(&options, "{sv}", "Features", g_variant_new_uint16(features));
 
-	g_dbus_message_set_body(msg, g_variant_new("(osa{sv})", path, uuid, options));
+	g_dbus_message_set_body(msg, g_variant_new("(osa{sv})", path, uuid, &options));
+	g_variant_builder_clear(&options);
 
 	if ((rep = g_dbus_connection_send_message_with_reply_sync(conn, msg,
 					G_DBUS_SEND_MESSAGE_FLAGS_NONE, -1, NULL, NULL, &err)) == NULL)
@@ -963,14 +965,16 @@ final:
  * is controlled by the global configuration structure - if none is enabled,
  * this function will do nothing. */
 void bluez_register_hfp(void) {
-	if (config.enable_hsp) {
+	if (config.enable.hsp_hs)
 		bluez_register_profile(BLUETOOTH_UUID_HSP_HS, BLUETOOTH_PROFILE_HSP_HS, 0x0, 0x0);
+	if (config.enable.hsp_ag)
 		bluez_register_profile(BLUETOOTH_UUID_HSP_AG, BLUETOOTH_PROFILE_HSP_AG, 0x0, 0x0);
-	}
-	if (config.enable_hfp) {
-		bluez_register_profile(BLUETOOTH_UUID_HFP_HF, BLUETOOTH_PROFILE_HFP_HF, 0x0107, 0x0);
-		bluez_register_profile(BLUETOOTH_UUID_HFP_AG, BLUETOOTH_PROFILE_HFP_AG, 0x0107, 0x0);
-	}
+	if (config.enable.hfp_hf)
+		bluez_register_profile(BLUETOOTH_UUID_HFP_HF, BLUETOOTH_PROFILE_HFP_HF,
+				0x0107 /* HFP 1.7 */, config.hfp.features_sdp_hf);
+	if (config.enable.hfp_ag)
+		bluez_register_profile(BLUETOOTH_UUID_HFP_AG, BLUETOOTH_PROFILE_HFP_AG,
+				0x0107 /* HFP 1.7 */, config.hfp.features_sdp_ag);
 }
 
 static void bluez_signal_interfaces_added(GDBusConnection *conn, const gchar *sender,
@@ -989,7 +993,7 @@ static void bluez_signal_interfaces_added(GDBusConnection *conn, const gchar *se
 
 	g_variant_get(params, "(&oa{sa{sv}})", &object, &interfaces);
 
-	if (config.enable_a2dp && strcmp(object, device_path) == 0)
+	if (strcmp(object, device_path) == 0)
 		bluez_register_a2dp();
 	if (strcmp(object, "/org/bluez") == 0)
 		bluez_register_hfp();

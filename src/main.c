@@ -30,8 +30,26 @@
 #include "ctl.h"
 #include "transport.h"
 #include "utils.h"
+#include "shared/defs.h"
 #include "shared/log.h"
 
+
+static char *get_a2dp_codecs(
+		const struct bluez_a2dp_codec **codecs,
+		enum bluez_a2dp_dir dir) {
+
+	const char *tmp[16] = { NULL };
+	int i = 0;
+
+	while (*codecs != NULL) {
+		const struct bluez_a2dp_codec *c = *codecs++;
+		if (c->dir != dir)
+			continue;
+		tmp[i++] = bluetooth_a2dp_codec_to_string(c->id);
+	}
+
+	return g_strjoinv(", ", (char **)tmp);
+}
 
 static GMainLoop *loop = NULL;
 static void main_loop_stop(int sig) {
@@ -47,22 +65,20 @@ static void main_loop_stop(int sig) {
 int main(int argc, char **argv) {
 
 	int opt;
-	const char *opts = "hVSi:";
+	const char *opts = "hVSi:p:";
 	const struct option longopts[] = {
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
 		{ "syslog", no_argument, NULL, 'S' },
 		{ "device", required_argument, NULL, 'i' },
-		{ "disable-a2dp", no_argument, NULL, 1 },
-		{ "disable-hsp", no_argument, NULL, 2 },
-		{ "disable-hfp", no_argument, NULL, 3 },
+		{ "profile", required_argument, NULL, 'p' },
+		{ "a2dp-force-mono", no_argument, NULL, 6 },
+		{ "a2dp-force-audio-cd", no_argument, NULL, 7 },
+		{ "a2dp-volume", no_argument, NULL, 8 },
 #if ENABLE_AAC
 		{ "aac-afterburner", no_argument, NULL, 4 },
 		{ "aac-vbr-mode", required_argument, NULL, 5 },
 #endif
-		{ "a2dp-force-mono", no_argument, NULL, 6 },
-		{ "a2dp-force-audio-cd", no_argument, NULL, 7 },
-		{ "a2dp-volume", no_argument, NULL, 8 },
 		{ 0, 0, 0, 0 },
 	};
 
@@ -75,8 +91,13 @@ int main(int argc, char **argv) {
 	 * errors. */
 	opterr = 0;
 	while ((opt = getopt_long(argc, argv, opts, longopts, NULL)) != -1)
-		if (opt == 'S') {
+		switch (opt) {
+		case 'S':
 			syslog = true;
+			break;
+		case 'p':
+			/* reset defaults if user has specified profile option */
+			memset(&config.enable, 0, sizeof(config.enable));
 			break;
 		}
 
@@ -110,15 +131,14 @@ int main(int argc, char **argv) {
 		switch (opt) {
 
 		case 'h' /* --help */ :
-			printf("usage: %s [OPTION]...\n"
-					"\noptions:\n"
+			printf("Usage:\n"
+					"  %s [OPTION]...\n"
+					"\nOptions:\n"
 					"  -h, --help\t\tprint this help and exit\n"
 					"  -V, --version\t\tprint version and exit\n"
 					"  -S, --syslog\t\tsend output to syslog\n"
 					"  -i, --device=hciX\tHCI device to use\n"
-					"  --disable-a2dp\tdisable A2DP support\n"
-					"  --disable-hsp\t\tdisable HSP support\n"
-					"  --disable-hfp\t\tdisable HFP support\n"
+					"  -p, --profile=NAME\tenable BT profile\n"
 					"  --a2dp-force-mono\tforce monophonic sound\n"
 					"  --a2dp-force-audio-cd\tforce 44.1 kHz sampling\n"
 					"  --a2dp-volume\t\tcontrol volume natively\n"
@@ -126,7 +146,21 @@ int main(int argc, char **argv) {
 					"  --aac-afterburner\tenable afterburner\n"
 					"  --aac-vbr-mode=NB\tset VBR mode to NB\n"
 #endif
-					, argv[0]);
+					"\nAvailable BT profiles:\n"
+					"  - a2dp-source\tAdvanced Audio Source (%s)\n"
+					"  - a2dp-sink\tAdvanced Audio Sink (%s)\n"
+					"  - hfp-hf\tHands-Free (%s)\n"
+					"  - hfp-ag\tHands-Free Audio Gateway (%s)\n"
+					"  - hsp-hs\tHeadset (%s)\n"
+					"  - hsp-ag\tHeadset Audio Gateway (%s)\n"
+					"\n"
+					"By default only output profiles are enabled, which includes A2DP Source and\n"
+					"HSP/HFP Audio Gateways. If one wants to enable other set of profiles, it is\n"
+					"required to explicitly specify all of them using `-p NAME` options.\n",
+					argv[0],
+					get_a2dp_codecs(config.a2dp.codecs, BLUEZ_A2DP_SOURCE),
+					get_a2dp_codecs(config.a2dp.codecs, BLUEZ_A2DP_SINK),
+					"v1.7", "v1.7", "v1.2", "v1.2");
 			return EXIT_SUCCESS;
 
 		case 'V' /* --version */ :
@@ -167,14 +201,43 @@ int main(int argc, char **argv) {
 			break;
 		}
 
-		case 1 /* --disable-a2dp */ :
-			config.enable_a2dp = false;
+		case 'p' /* --profile=NAME */ : {
+
+			size_t i;
+			const struct {
+				char *name;
+				bool *ptr;
+			} map[] = {
+				{ "a2dp-source", &config.enable.a2dp_source },
+				{ "a2dp-sink", &config.enable.a2dp_sink },
+				{ "hfp-hf", &config.enable.hfp_hf },
+				{ "hfp-ag", &config.enable.hfp_ag },
+				{ "hsp-hs", &config.enable.hsp_hs },
+				{ "hsp-ag", &config.enable.hsp_ag },
+			};
+
+			for (i = 0; i < ARRAYSIZE(map); i++)
+				if (strcasecmp(optarg, map[i].name) == 0) {
+					*map[i].ptr = true;
+					break;
+				}
+
+			if (i == ARRAYSIZE(map)) {
+				error("Invalid BT profile name: %s", optarg);
+				return EXIT_FAILURE;
+			}
+
 			break;
-		case 2 /* --disable-hsp */ :
-			config.enable_hsp = false;
+		}
+
+		case 6 /* --a2dp-force-mono */ :
+			config.a2dp.force_mono = true;
 			break;
-		case 3 /* --disable-hfp */ :
-			config.enable_hfp = false;
+		case 7 /* --a2dp-force-audio-cd */ :
+			config.a2dp.force_44100 = true;
+			break;
+		case 8 /* --a2dp-volume */ :
+			config.a2dp.volume = true;
 			break;
 
 #if ENABLE_AAC
@@ -189,16 +252,6 @@ int main(int argc, char **argv) {
 			}
 			break;
 #endif
-
-		case 6 /* --a2dp-force-mono */ :
-			config.a2dp_force_mono = true;
-			break;
-		case 7 /* --a2dp-force-audio-cd */ :
-			config.a2dp_force_44100 = true;
-			break;
-		case 8 /* --a2dp-volume */ :
-			config.a2dp_volume = true;
-			break;
 
 		default:
 			fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);

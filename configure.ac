@@ -2,7 +2,7 @@
 # Copyright (c) 2016-2017 Arkadiusz Bokowy
 
 AC_PREREQ([2.59])
-AC_INIT([bluez-alsa], [1.2.0], [arkadiusz.bokowy@gmail.com])
+AC_INIT([bluez-alsa], [1.3.0], [arkadiusz.bokowy@gmail.com])
 AM_INIT_AUTOMAKE([foreign subdir-objects -Wall -Werror])
 
 AC_CONFIG_HEADERS([config.h])
@@ -31,6 +31,7 @@ AM_CONDITIONAL([ENABLE_DEBUG_TIME], [test "x$enable_debug_time" = "xyes"])
 AM_COND_IF([ENABLE_DEBUG_TIME], [
 	AC_DEFINE([DEBUG_TIME], [1], [Define to 1 if the debug timing is enabled.])
 ])
+AC_CHECK_FUNCS([register_printf_specifier])
 
 AC_CHECK_LIB([pthread], [pthread_create],
 	[], [AC_MSG_ERROR([pthread library not found])])
@@ -73,6 +74,10 @@ AM_COND_IF([ENABLE_PAYLOADCHECK], [
 AC_ARG_ENABLE([aplay],
 	[AS_HELP_STRING([--disable-aplay], [disable building of bluealsa-aplay tool])])
 AM_CONDITIONAL([ENABLE_APLAY], [test "x$enable_aplay" != "xno"])
+
+AC_ARG_ENABLE([rfcomm],
+	[AS_HELP_STRING([--enable-rfcomm], [enable building of bluealsa-rfcomm tool])])
+AM_CONDITIONAL([ENABLE_RFCOMM], [test "x$enable_rfcomm" = "xyes"])
 
 AC_ARG_ENABLE([hcitop],
 	[AS_HELP_STRING([--enable-hcitop], [enable building of hcitop tool])])

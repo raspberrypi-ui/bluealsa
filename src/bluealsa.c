@@ -1,6 +1,6 @@
 /*
  * BlueALSA - bluealsa.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -12,16 +12,17 @@
 
 #include <grp.h>
 
+#include "hfp.h"
 #include "transport.h"
 
 
 /* Initialize global configuration variable. */
 struct ba_config config = {
 
-	/* by default all profiles are enabled */
-	.enable_a2dp = true,
-	.enable_hsp = true,
-	.enable_hfp = true,
+	/* enable output profiles by default */
+	.enable.a2dp_source = true,
+	.enable.hsp_ag = true,
+	.enable.hfp_ag = true,
 
 	/* initialization flags */
 	.ctl.socket_created = false,
@@ -30,20 +31,34 @@ struct ba_config config = {
 	/* omit chown if audio group is not defined */
 	.gid_audio = -1,
 
+	.hfp.features_sdp_hf =
+		SDP_HFP_HF_FEAT_CLI |
+		SDP_HFP_HF_FEAT_VOLUME,
+	.hfp.features_sdp_ag = 0,
+	.hfp.features_rfcomm_hf =
+		HFP_HF_FEAT_CLI |
+		HFP_HF_FEAT_VOLUME |
+		HFP_HF_FEAT_ECS |
+		HFP_HF_FEAT_ECC |
+		HFP_HF_FEAT_CODEC,
+	.hfp.features_rfcomm_ag =
+		HFP_AG_FEAT_REJECT |
+		HFP_AG_FEAT_ECS |
+		HFP_AG_FEAT_ECC |
+		HFP_AG_FEAT_EERC |
+		HFP_AG_FEAT_CODEC,
+
+	.a2dp.volume = false,
+	.a2dp.force_mono = false,
+	.a2dp.force_44100 = false,
+
 #if ENABLE_AAC
 	/* There are two issues with the afterburner: a) it uses a LOT of power,
 	 * b) it generates larger payload (see VBR comment). These two reasons
 	 * are good enough to not enable afterburner by default. */
 	.aac_afterburner = false,
-	/* Low bitrate for VBR mode should ensure, that the RTP payload will not
-	 * exceed our writing MTU. It is important not to do so, because the code
-	 * responsible for fragmentation seems not to work as expected. */
-	.aac_vbr_mode = 3,
+	.aac_vbr_mode = 4,
 #endif
-
-	.a2dp_force_mono = false,
-	.a2dp_force_44100 = false,
-	.a2dp_volume = false,
 
 };
 
@@ -63,6 +78,8 @@ int bluealsa_config_init(void) {
 	/* use proper ACL group for our audio device */
 	if ((grp = getgrnam("audio")) != NULL)
 		config.gid_audio = grp->gr_gid;
+
+	config.a2dp.codecs = bluez_a2dp_codecs;
 
 	return 0;
 }

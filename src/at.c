@@ -1,6 +1,6 @@
 /*
  * BlueALSA - at.c
- * Copyright (c) 2016-2017 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *               2017 Juha Kuikka
  *
  * This file is a part of bluez-alsa.
@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "shared/defs.h"
 #include "shared/log.h"
 
 
@@ -33,6 +34,9 @@
 char *at_build(char *buffer, enum bt_at_type type, const char *command,
 		const char *value) {
 	switch (type) {
+	case AT_TYPE_RAW:
+		strcpy(buffer, command);
+		break;
 	case AT_TYPE_CMD:
 		sprintf(buffer, "AT%s\r", command);
 		break;
@@ -193,7 +197,7 @@ int at_parse_cind(const char *str, enum hfp_ind map[20]) {
 	for (i = 0; i < 20; i++) {
 		if (sscanf(str, " ( \"%15[a-z]\" , ( %*[0-9,-] ) )", ind) != 1)
 			return -1;
-		for (ii = 0; ii < sizeof(mapping) / sizeof(*mapping); ii++)
+		for (ii = 0; ii < ARRAYSIZE(mapping); ii++)
 			if (strcmp(mapping[ii].str, ind) == 0) {
 				map[i] = mapping[ii].ind;
 				break;
@@ -213,6 +217,7 @@ int at_parse_cind(const char *str, enum hfp_ind map[20]) {
  * @return Human-readable string. */
 const char *at_type2str(enum bt_at_type type) {
 	static const char *types[__AT_TYPE_MAX] = {
+		[AT_TYPE_RAW] = "RAW",
 		[AT_TYPE_CMD] = "CMD",
 		[AT_TYPE_CMD_GET] = "GET",
 		[AT_TYPE_CMD_SET] = "SET",

@@ -38,6 +38,16 @@ enum ba_transport_state {
 	TRANSPORT_LIMBO,
 };
 
+enum ba_transport_signal {
+	TRANSPORT_PCM_OPEN,
+	TRANSPORT_PCM_CLOSE,
+	TRANSPORT_PCM_PAUSE,
+	TRANSPORT_PCM_RESUME,
+	TRANSPORT_PCM_SYNC,
+	TRANSPORT_SET_VOLUME,
+	TRANSPORT_SEND_RFCOMM,
+};
+
 struct ba_device {
 
 	/* ID of the underlying HCI device */
@@ -80,7 +90,6 @@ struct ba_pcm {
 	int client;
 
 	/* variables used for PCM synchronization */
-	bool sync;
 	pthread_cond_t drained;
 	pthread_mutex_t drained_mn;
 
@@ -118,10 +127,10 @@ struct ba_transport {
 	size_t mtu_read;
 	size_t mtu_write;
 
-	/* File descriptor used to notify thread about changes. If thread is based
-	 * on loop with an event wait syscall (e.g. poll), this file descriptor is
-	 * used to send a control event. */
-	int event_fd;
+	/* PIPE used to notify thread about changes. If thread is based on loop with
+	 * an event wait syscall (e.g. poll), this file descriptor is used to send a
+	 * control event. */
+	int sig_fd[2];
 
 	/* Overall delay in 1/10 of millisecond, caused by the data transfer and
 	 * the audio encoder or decoder. */
@@ -222,6 +231,9 @@ void transport_free(struct ba_transport *t);
 struct ba_transport *transport_lookup(GHashTable *devices, const char *dbus_path);
 struct ba_transport *transport_lookup_pcm_client(GHashTable *devices, int client);
 bool transport_remove(GHashTable *devices, const char *dbus_path);
+
+int transport_send_signal(struct ba_transport *t, enum ba_transport_signal sig);
+int transport_send_rfcomm(struct ba_transport *t, const char command[32]);
 
 unsigned int transport_get_channels(const struct ba_transport *t);
 unsigned int transport_get_sampling(const struct ba_transport *t);

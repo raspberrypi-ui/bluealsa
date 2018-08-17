@@ -12,10 +12,10 @@
 #include "transport.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -47,7 +47,7 @@ static int io_thread_create(struct ba_transport *t) {
 			case A2DP_CODEC_SBC:
 				routine = io_thread_a2dp_source_sbc;
 				break;
-#if ENABLE_MP3
+#if ENABLE_MPEG
 			case A2DP_CODEC_MPEG12:
 				break;
 #endif
@@ -69,7 +69,7 @@ static int io_thread_create(struct ba_transport *t) {
 			case A2DP_CODEC_SBC:
 				routine = io_thread_a2dp_sink_sbc;
 				break;
-#if ENABLE_MP3
+#if ENABLE_MPEG
 			case A2DP_CODEC_MPEG12:
 				break;
 #endif
@@ -101,7 +101,7 @@ static int io_thread_create(struct ba_transport *t) {
 
 	pthread_setname_np(t->thread, "baio");
 	debug("Created new IO thread: %s",
-			bluetooth_profile_to_string(t->profile, t->codec));
+			bluetooth_profile_to_string(t->profile));
 	return 0;
 }
 
@@ -196,7 +196,7 @@ bool device_remove(GHashTable *devices, const char *key) {
 void device_set_battery_level(struct ba_device *d, uint8_t value) {
 	d->battery.enabled = true;
 	d->battery.level = value;
-	bluealsa_ctl_event(EVENT_UPDATE_BATTERY);
+	bluealsa_ctl_event(BA_EVENT_UPDATE_BATTERY);
 }
 
 /**
@@ -239,14 +239,15 @@ struct ba_transport *transport_new(
 	t->thread = config.main_thread;
 
 	t->bt_fd = -1;
-	t->event_fd = -1;
+	t->sig_fd[0] = -1;
+	t->sig_fd[1] = -1;
 
 	if ((t->dbus_owner = strdup(dbus_owner)) == NULL)
 		goto fail;
 	if ((t->dbus_path = strdup(dbus_path)) == NULL)
 		goto fail;
 
-	if ((t->event_fd = eventfd(0, EFD_CLOEXEC)) == -1)
+	if (pipe(t->sig_fd) == -1)
 		goto fail;
 
 	g_hash_table_insert(device->transports, t->dbus_path, t);
@@ -288,7 +289,7 @@ struct ba_transport *transport_new_a2dp(
 	pthread_cond_init(&t->a2dp.pcm.drained, NULL);
 	pthread_mutex_init(&t->a2dp.pcm.drained_mn, NULL);
 
-	bluealsa_ctl_event(EVENT_TRANSPORT_ADDED);
+	bluealsa_ctl_event(BA_EVENT_TRANSPORT_ADDED);
 	return t;
 }
 
@@ -328,7 +329,7 @@ struct ba_transport *transport_new_rfcomm(
 
 	transport_set_state(t_sco, TRANSPORT_ACTIVE);
 
-	bluealsa_ctl_event(EVENT_TRANSPORT_ADDED);
+	bluealsa_ctl_event(BA_EVENT_TRANSPORT_ADDED);
 	return t;
 
 fail:
@@ -344,8 +345,9 @@ void transport_free(struct ba_transport *t) {
 		return;
 
 	t->state = TRANSPORT_LIMBO;
-	debug("Freeing transport: %s",
-			bluetooth_profile_to_string(t->profile, t->codec));
+	debug("Freeing transport: %s (%s)",
+			bluetooth_profile_to_string(t->profile),
+			bluetooth_a2dp_codec_to_string(t->codec));
 
 	/* If the transport is active, prior to releasing resources, we have to
 	 * terminate the IO thread (or at least make sure it is not running any
@@ -362,8 +364,10 @@ void transport_free(struct ba_transport *t) {
 
 	if (t->bt_fd != -1)
 		close(t->bt_fd);
-	if (t->event_fd != -1)
-		close(t->event_fd);
+	if (t->sig_fd[0] != -1)
+		close(t->sig_fd[0]);
+	if (t->sig_fd[1] != -1)
+		close(t->sig_fd[1]);
 
 	/* free type-specific resources */
 	switch (t->type) {
@@ -394,7 +398,7 @@ void transport_free(struct ba_transport *t) {
 	 * removed anyway. */
 	g_hash_table_steal(t->device->transports, t->dbus_path);
 
-	bluealsa_ctl_event(EVENT_TRANSPORT_REMOVED);
+	bluealsa_ctl_event(BA_EVENT_TRANSPORT_REMOVED);
 
 	free(t->dbus_owner);
 	free(t->dbus_path);
@@ -470,6 +474,20 @@ bool transport_remove(GHashTable *devices, const char *dbus_path) {
 	return false;
 }
 
+int transport_send_signal(struct ba_transport *t, enum ba_transport_signal sig) {
+	return write(t->sig_fd[1], &sig, sizeof(sig));
+}
+
+int transport_send_rfcomm(struct ba_transport *t, const char command[32]) {
+
+	char msg[sizeof(enum ba_transport_signal) + 32];
+
+	((enum ba_transport_signal *)msg)[0] = TRANSPORT_SEND_RFCOMM;
+	memcpy(&msg[sizeof(enum ba_transport_signal)], command, 32);
+
+	return write(t->sig_fd[1], msg, sizeof(msg));
+}
+
 unsigned int transport_get_channels(const struct ba_transport *t) {
 
 	switch (t->type) {
@@ -485,7 +503,7 @@ unsigned int transport_get_channels(const struct ba_transport *t) {
 				return 2;
 			}
 			break;
-#if ENABLE_MP3
+#if ENABLE_MPEG
 		case A2DP_CODEC_MPEG12:
 			switch (((a2dp_mpeg_t *)t->a2dp.cconfig)->channel_mode) {
 			case MPEG_CHANNEL_MODE_MONO:
@@ -513,8 +531,6 @@ unsigned int transport_get_channels(const struct ba_transport *t) {
 			case APTX_CHANNEL_MODE_MONO:
 				return 1;
 			case APTX_CHANNEL_MODE_STEREO:
-			case APTX_CHANNEL_MODE_JOINT_STEREO:
-			case APTX_CHANNEL_MODE_DUAL_CHANNEL:
 				return 2;
 			}
 			break;
@@ -548,7 +564,7 @@ unsigned int transport_get_sampling(const struct ba_transport *t) {
 				return 48000;
 			}
 			break;
-#if ENABLE_MP3
+#if ENABLE_MPEG
 		case A2DP_CODEC_MPEG12:
 			switch (((a2dp_mpeg_t *)t->a2dp.cconfig)->frequency) {
 			case MPEG_SAMPLING_FREQ_16000:
@@ -643,7 +659,7 @@ int transport_set_volume(struct ba_transport *t, uint8_t ch1_muted, uint8_t ch2_
 		t->a2dp.ch1_volume = ch1_volume;
 		t->a2dp.ch2_volume = ch2_volume;
 
-		if (config.a2dp_volume) {
+		if (config.a2dp.volume) {
 			uint16_t volume = (ch1_muted | ch2_muted) ? 0 : MIN(ch1_volume, ch2_volume);
 			g_dbus_set_property(config.dbus, t->dbus_owner, t->dbus_path,
 					"org.bluez.MediaTransport1", "Volume", g_variant_new_uint16(volume));
@@ -662,7 +678,7 @@ int transport_set_volume(struct ba_transport *t, uint8_t ch1_muted, uint8_t ch2_
 		t->sco.mic_gain = ch2_volume;
 
 		/* notify associated RFCOMM transport */
-		eventfd_write(t->sco.rfcomm->event_fd, 1);
+		transport_send_signal(t->sco.rfcomm, TRANSPORT_SET_VOLUME);
 
 		break;
 
@@ -759,10 +775,8 @@ int transport_drain_pcm(struct ba_transport *t) {
 
 	pthread_mutex_lock(&pcm->drained_mn);
 
-	pcm->sync = true;
-	eventfd_write(t->event_fd, 1);
+	transport_send_signal(t, TRANSPORT_PCM_SYNC);
 	pthread_cond_wait(&pcm->drained, &pcm->drained_mn);
-	pcm->sync = false;
 
 	pthread_mutex_unlock(&pcm->drained_mn);
 
@@ -843,8 +857,9 @@ int transport_release_bt_a2dp(struct ba_transport *t) {
 	if (t->bt_fd == -1)
 		return 0;
 
-	debug("Releasing transport: %s",
-			bluetooth_profile_to_string(t->profile, t->codec));
+	debug("Releasing transport: %s (%s)",
+			bluetooth_profile_to_string(t->profile),
+			bluetooth_a2dp_codec_to_string(t->codec));
 
 	/* If the state is idle, it means that either transport was not acquired, or
 	 * was released by the BlueZ. In both cases there is no point in a explicit

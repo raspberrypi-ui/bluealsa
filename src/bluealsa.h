@@ -1,6 +1,6 @@
 /*
  * BlueALSA - bluealsa.h
- * Copyright (c) 2016 Arkadiusz Bokowy
+ * Copyright (c) 2016-2018 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -26,6 +26,7 @@
 #include <gio/gio.h>
 
 #include "bluez.h"
+#include "bluez-a2dp.h"
 #include "shared/ctl-proto.h"
 
 /* Maximal number of clients connected to the controller. */
@@ -41,9 +42,15 @@ struct ba_config {
 	/* used HCI device */
 	struct hci_dev_info hci_dev;
 
-	bool enable_a2dp;
-	bool enable_hsp;
-	bool enable_hfp;
+	/* set of enabled profiles */
+	struct {
+		bool a2dp_source;
+		bool a2dp_sink;
+		bool hsp_hs;
+		bool hsp_ag;
+		bool hfp_hf;
+		bool hfp_ag;
+	} enable;
 
 	/* established D-Bus connection */
 	GDBusConnection *dbus;
@@ -69,29 +76,46 @@ struct ba_config {
 
 		struct pollfd pfds[__CTL_IDX_MAX + BLUEALSA_MAX_CLIENTS];
 		/* event subscriptions for connected clients */
-		enum event subs[BLUEALSA_MAX_CLIENTS];
+		enum ba_event subs[BLUEALSA_MAX_CLIENTS];
 
 		/* PIPE for transferring events */
 		int evt[2];
 
 	} ctl;
 
+	struct {
+		/* set of features exposed via Service Discovery */
+		int features_sdp_hf;
+		int features_sdp_ag;
+		/* set of features exposed via RFCOMM connection */
+		int features_rfcomm_hf;
+		int features_rfcomm_ag;
+	} hfp;
+
+	struct {
+
+		/* NULL-terminated list of available A2DP codecs */
+		const struct bluez_a2dp_codec **codecs;
+
+		/* Control audio volume natively by the connected device. The disadvantage
+		 * of this control type is a monophonic volume change. */
+		bool volume;
+
+		/* Support for monophonic sound in the A2DP profile is mandatory for
+		 * sink and semi-mandatory for source. So, if one wants only the bare
+		 * minimum, it would be possible - e.g. due to bandwidth limitations. */
+		bool force_mono;
+		/* The sampling rates of 44.1 kHz (aka Audio CD) and 48 kHz are mandatory
+		 * for sink endpoint and semi-mandatory for source. It is then possible
+		 * to force lower sampling in order to save Bluetooth bandwidth. */
+		bool force_44100;
+
+	} a2dp;
+
 #if ENABLE_AAC
 	bool aac_afterburner;
 	uint8_t aac_vbr_mode;
 #endif
-
-	/* Support for monophonic sound in the A2DP profile is mandatory for
-	 * sink and semi-mandatory for source. So, if one wants only the bare
-	 * minimum, it would be possible - e.g. due to bandwidth limitations. */
-	bool a2dp_force_mono;
-	/* The sampling rates of 44.1 kHz (aka Audio CD) and 48 kHz are mandatory
-	 * for sink endpoint and semi-mandatory for source. It is then possible
-	 * to force lower sampling in order to save Bluetooth bandwidth. */
-	bool a2dp_force_44100;
-	/* Control audio volume natively by the connected device. The disadvantage
-	 * of this control type is a monophonic volume change. */
-	bool a2dp_volume;
 
 };
 
