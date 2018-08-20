@@ -1,1 +1,1 @@
-ACTION=="add", KERNEL=="hci0", RUN+="/bin/systemctl start bluealsa.service"
+ACTION=="add", KERNEL=="hci0", TAG+="systemd", ENV{SYSTEMD_WANTS}="bluealsa.service"

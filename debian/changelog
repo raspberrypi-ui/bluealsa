@@ -1,3 +1,10 @@
+bluealsa (0.8) stretch; urgency=medium
+
+  * Merge in recent changes to original bluezalsa
+  * Don't start the service automatically - use the udev rule
+
+ -- Serge Schneider <serge@raspberrypi.org>  Mon, 20 Aug 2018 10:33:21 +0100
+
 bluealsa (0.7) stretch; urgency=medium
 
   * Merge in recent changes to original bluezalsa; enable for CLI boot
