@@ -1,3 +1,9 @@
+bluealsa (0.9) stretch; urgency=medium
+
+  * Change = to += in udev rule
+
+ -- Serge Schneider <serge@raspberrypi.org>  Mon, 20 Aug 2018 17:32:28 +0100
+
 bluealsa (0.8) stretch; urgency=medium
 
   * Merge in recent changes to original bluezalsa
