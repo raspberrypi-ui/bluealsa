@@ -7,6 +7,3 @@ After=bluetooth.service
 Type=simple
 User=root
 ExecStart=/usr/bin/bluealsa
-
-[Install]
-WantedBy=multi-user.target
