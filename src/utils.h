@@ -1,6 +1,6 @@
 /*
  * BlueALSA - utils.h
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -12,7 +12,7 @@
 #define BLUEALSA_UTILS_H_
 
 #if HAVE_CONFIG_H
-# include "config.h"
+# include <config.h>
 #endif
 
 #include <stdbool.h>
@@ -35,7 +35,6 @@ const char *batostr_(const bdaddr_t *ba);
 
 const char *g_dbus_get_profile_object_path(enum bluetooth_profile profile, uint16_t codec);
 enum bluetooth_profile g_dbus_object_path_to_profile(const char *path);
-uint16_t g_dbus_object_path_to_a2dp_codec(const char *path);
 int g_dbus_device_path_to_bdaddr(const char *path, bdaddr_t *addr);
 
 GVariant *g_dbus_get_property(GDBusConnection *conn, const char *name,
@@ -52,6 +51,10 @@ void snd_pcm_scale_s16le(int16_t *buffer, size_t size, int channels,
 #include <fdk-aac/aacenc_lib.h>
 const char *aacdec_strerror(AAC_DECODER_ERROR err);
 const char *aacenc_strerror(AACENC_ERROR err);
+#endif
+
+#if ENABLE_LDAC
+const char *ldacBT_strerror(int err);
 #endif
 
 #endif

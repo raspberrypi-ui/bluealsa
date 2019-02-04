@@ -238,7 +238,7 @@ static int rfcomm_handler_ciev_resp_cb(struct rfcomm_conn *c, const struct bt_at
 		switch (c->hfp_ind_map[index - 1]) {
 		case HFP_IND_CALL:
 		case HFP_IND_CALLSETUP:
-			transport_send_signal(t->rfcomm.sco, TRANSPORT_PCM_OPEN);
+			transport_send_signal(t->rfcomm.sco, TRANSPORT_BT_OPEN);
 			break;
 		case HFP_IND_BATTCHG:
 			device_set_battery_level(t->device, value * 100 / 5);
@@ -316,7 +316,8 @@ static int rfcomm_handler_vgm_set_cb(struct rfcomm_conn *c, const struct bt_at *
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "OK") == -1)
 		return -1;
 
-	bluealsa_ctl_event(BA_EVENT_UPDATE_VOLUME);
+	bluealsa_ctl_send_event(BA_EVENT_VOLUME_CHANGED, &t->device->addr,
+			BA_PCM_TYPE_SCO | BA_PCM_STREAM_CAPTURE);
 	return 0;
 }
 
@@ -330,7 +331,8 @@ static int rfcomm_handler_vgs_set_cb(struct rfcomm_conn *c, const struct bt_at *
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "OK") == -1)
 		return -1;
 
-	bluealsa_ctl_event(BA_EVENT_UPDATE_VOLUME);
+	bluealsa_ctl_send_event(BA_EVENT_VOLUME_CHANGED, &t->device->addr,
+			BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK);
 	return 0;
 }
 
@@ -374,7 +376,8 @@ static int rfcomm_handler_resp_bcs_ok_cb(struct rfcomm_conn *c, const struct bt_
 	/* When codec selection is completed, notify connected clients, that
 	 * transport has been changed. Note, that this event might be emitted
 	 * for an active transport - codec switching. */
-	bluealsa_ctl_event(BA_EVENT_TRANSPORT_CHANGED);
+	bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &c->t->device->addr,
+			BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
 	return 0;
 }
 
@@ -552,7 +555,7 @@ void *rfcomm_thread(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(transport_pthread_cleanup, t);
+	pthread_cleanup_push(PTHREAD_CLEANUP(transport_pthread_cleanup), t);
 
 	/* initialize structure used for synchronization */
 	struct rfcomm_conn conn = {
@@ -618,6 +621,7 @@ void *rfcomm_thread(void *arg) {
 						conn.handler = &rfcomm_handler_resp_ok;
 						break;
 					}
+					/* fall-through */
 				case HFP_SLC_BAC_SET_OK:
 					if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_TEST, "+CIND", NULL) == -1)
 						goto ioerror;
@@ -643,15 +647,19 @@ void *rfcomm_thread(void *arg) {
 					break;
 				case HFP_SLC_CMER_SET_OK:
 					rfcomm_set_hfp_state(&conn, HFP_SLC_CONNECTED);
+					/* fall-through */
 				case HFP_SLC_CONNECTED:
 					if (t->rfcomm.hfp_features & HFP_AG_FEAT_CODEC)
 						break;
+					/* fall-through */
 				case HFP_CC_BCS_SET:
 				case HFP_CC_BCS_SET_OK:
 				case HFP_CC_CONNECTED:
 					rfcomm_set_hfp_state(&conn, HFP_CONNECTED);
+					/* fall-through */
 				case HFP_CONNECTED:
-					bluealsa_ctl_event(BA_EVENT_TRANSPORT_ADDED);
+					bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &t->device->addr,
+							BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
 				}
 
 			if (t->profile == BLUETOOTH_PROFILE_HFP_AG)
@@ -667,6 +675,7 @@ void *rfcomm_thread(void *arg) {
 					break;
 				case HFP_SLC_CMER_SET_OK:
 					rfcomm_set_hfp_state(&conn, HFP_SLC_CONNECTED);
+					/* fall-through */
 				case HFP_SLC_CONNECTED:
 					if (t->rfcomm.hfp_features & HFP_HF_FEAT_CODEC) {
 						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RESP, "+BCS", "1") == -1)
@@ -675,12 +684,15 @@ void *rfcomm_thread(void *arg) {
 						conn.handler = &rfcomm_handler_bcs_set;
 						break;
 					}
+					/* fall-through */
 				case HFP_CC_BCS_SET:
 				case HFP_CC_BCS_SET_OK:
 				case HFP_CC_CONNECTED:
 					rfcomm_set_hfp_state(&conn, HFP_CONNECTED);
+					/* fall-through */
 				case HFP_CONNECTED:
-					bluealsa_ctl_event(BA_EVENT_TRANSPORT_ADDED);
+					bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &t->device->addr,
+							BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
 				}
 
 			if (conn.handler != NULL) {
@@ -701,6 +713,8 @@ void *rfcomm_thread(void *arg) {
 			debug("RFCOMM poll timeout");
 			continue;
 		case -1:
+			if (errno == EINTR)
+				continue;
 			error("RFCOMM poll error: %s", strerror(errno));
 			goto fail;
 		}

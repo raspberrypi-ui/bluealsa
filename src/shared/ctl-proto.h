@@ -1,6 +1,6 @@
 /*
  * BlueALSA - ctl-proto.h
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -12,7 +12,7 @@
 #define BLUEALSA_SHARED_CTLPROTO_H_
 
 #if HAVE_CONFIG_H
-# include "config.h"
+# include <config.h>
 #endif
 
 #include <stdint.h>
@@ -21,7 +21,7 @@
 /* Location where the control socket and pipes are stored. */
 #define BLUEALSA_RUN_STATE_DIR RUN_STATE_DIR "/bluealsa"
 /* Version of the controller communication protocol. */
-#define BLUEALSA_CRL_PROTO_VERSION 0x0100
+#define BLUEALSA_CRL_PROTO_VERSION 0x0500
 
 enum ba_command {
 	BA_COMMAND_PING,
@@ -29,12 +29,13 @@ enum ba_command {
 	BA_COMMAND_LIST_DEVICES,
 	BA_COMMAND_LIST_TRANSPORTS,
 	BA_COMMAND_TRANSPORT_GET,
+	BA_COMMAND_TRANSPORT_SET_DELAY,
 	BA_COMMAND_TRANSPORT_SET_VOLUME,
 	BA_COMMAND_PCM_OPEN,
-	BA_COMMAND_PCM_CLOSE,
 	BA_COMMAND_PCM_PAUSE,
 	BA_COMMAND_PCM_RESUME,
 	BA_COMMAND_PCM_DRAIN,
+	BA_COMMAND_PCM_DROP,
 	BA_COMMAND_RFCOMM_SEND,
 	__BA_COMMAND_MAX
 };
@@ -43,17 +44,18 @@ enum ba_status_code {
 	BA_STATUS_CODE_SUCCESS = 0,
 	BA_STATUS_CODE_ERROR_UNKNOWN,
 	BA_STATUS_CODE_DEVICE_NOT_FOUND,
+	BA_STATUS_CODE_STREAM_NOT_FOUND,
+	BA_STATUS_CODE_CODEC_NOT_SELECTED,
 	BA_STATUS_CODE_DEVICE_BUSY,
 	BA_STATUS_CODE_FORBIDDEN,
-	BA_STATUS_CODE_PONG,
 };
 
 enum ba_event {
 	BA_EVENT_TRANSPORT_ADDED   = 1 << 0,
 	BA_EVENT_TRANSPORT_CHANGED = 1 << 1,
 	BA_EVENT_TRANSPORT_REMOVED = 1 << 2,
-	BA_EVENT_UPDATE_BATTERY    = 1 << 3,
-	BA_EVENT_UPDATE_VOLUME     = 1 << 4,
+	BA_EVENT_VOLUME_CHANGED    = 1 << 3,
+	BA_EVENT_BATTERY           = 1 << 4,
 };
 
 enum ba_pcm_type {
@@ -62,15 +64,17 @@ enum ba_pcm_type {
 	BA_PCM_TYPE_SCO,
 };
 
-enum ba_pcm_stream {
-	BA_PCM_STREAM_PLAYBACK,
-	BA_PCM_STREAM_CAPTURE,
-	/* Special stream type returned by the LIST_TRANSPORTS command to indicate,
-	 * that given transport can act as a playback and capture device. In order
-	 * to open PCM for such a transport, one has to provide one of PLAYBACK or
-	 * CAPTURE stream types. */
-	BA_PCM_STREAM_DUPLEX,
-};
+#define BA_PCM_STREAM_PLAYBACK (1 << 6)
+#define BA_PCM_STREAM_CAPTURE  (1 << 7)
+
+/**
+ * Bit mask for extracting actual PCM type enum value from the
+ * transport type field defined in the message structures. */
+#define BA_PCM_TYPE_MASK 0x3F
+
+/**
+ * Extract PCM type enum from the given value. */
+#define BA_PCM_TYPE(v) ((v) & BA_PCM_TYPE_MASK)
 
 struct __attribute__ ((packed)) ba_request {
 
@@ -78,22 +82,33 @@ struct __attribute__ ((packed)) ba_request {
 
 	/* selected device address */
 	bdaddr_t addr;
+	/* selected transport type */
+	uint8_t type;
 
-	/* requested transport type */
-	enum ba_pcm_type type;
-	enum ba_pcm_stream stream;
+	union {
 
-	/* bit-mask with event subscriptions */
-	enum ba_event events;
+		/* bit-mask with event subscriptions
+		 * used by BA_COMMAND_SUBSCRIBE */
+		enum ba_event events;
 
-	/* fields used by the TRANSPORT_SET_VOLUME command */
-	uint8_t ch1_muted:1;
-	uint8_t ch1_volume:7;
-	uint8_t ch2_muted:1;
-	uint8_t ch2_volume:7;
+		/* transport delay
+		 * used by BA_COMMAND_TRANSPORT_SET_DELAY */
+		uint16_t delay;
 
-	/* RFCOMM command string to send */
-	char rfcomm_command[32];
+		/* transport volume fields
+		 * used by BA_COMMAND_TRANSPORT_SET_VOLUME */
+		struct {
+			uint8_t ch1_muted:1;
+			uint8_t ch1_volume:7;
+			uint8_t ch2_muted:1;
+			uint8_t ch2_volume:7;
+		};
+
+		/* RFCOMM command string to send
+		 * used by BA_COMMAND_RFCOMM_SEND */
+		char rfcomm_command[32];
+
+	};
 
 };
 
@@ -107,7 +122,11 @@ struct __attribute__ ((packed)) ba_msg_status {
 
 struct __attribute__ ((packed)) ba_msg_event {
 	/* bit-mask with events */
-	enum ba_event mask;
+	uint8_t events;
+	/* device address for which event occurred */
+	bdaddr_t addr;
+	/* transport type for which event occurred */
+	uint8_t type;
 };
 
 struct __attribute__ ((packed)) ba_msg_device {
@@ -126,18 +145,17 @@ struct __attribute__ ((packed)) ba_msg_device {
 
 struct __attribute__ ((packed)) ba_msg_transport {
 
-	/* device address for which the transport is created */
+	/* device address */
 	bdaddr_t addr;
-
-	/* selected profile and audio codec */
-	enum ba_pcm_type type;
-	enum ba_pcm_stream stream;
-	uint8_t codec;
+	/* transport type */
+	uint8_t type;
+	/* selected audio codec */
+	uint16_t codec;
 
 	/* number of audio channels */
 	uint8_t channels;
 	/* used sampling frequency */
-	uint16_t sampling;
+	uint32_t sampling;
 
 	/* Levels for channel 1 (left) and 2 (right). These fields are also
 	 * used for SCO. In such a case channel 1 and 2 is responsible for

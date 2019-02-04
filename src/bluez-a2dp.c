@@ -1,6 +1,6 @@
 /*
  * BlueALSA - bluez-a2dp.c
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -8,11 +8,8 @@
  *
  */
 
-#if HAVE_CONFIG_H
-# include "config.h"
-#endif
-
 #include "bluez-a2dp.h"
+#include "shared/defs.h"
 
 static const a2dp_sbc_t a2dp_sbc = {
 	.frequency =
@@ -38,6 +35,20 @@ static const a2dp_sbc_t a2dp_sbc = {
 		SBC_ALLOCATION_LOUDNESS,
 	.min_bitpool = SBC_MIN_BITPOOL,
 	.max_bitpool = SBC_MAX_BITPOOL,
+};
+
+static const struct bluez_a2dp_channel_mode a2dp_sbc_channels[] = {
+	{ BLUEZ_A2DP_CHM_MONO, SBC_CHANNEL_MODE_MONO },
+	{ BLUEZ_A2DP_CHM_DUAL_CHANNEL, SBC_CHANNEL_MODE_DUAL_CHANNEL },
+	{ BLUEZ_A2DP_CHM_STEREO, SBC_CHANNEL_MODE_STEREO },
+	{ BLUEZ_A2DP_CHM_JOINT_STEREO, SBC_CHANNEL_MODE_JOINT_STEREO },
+};
+
+static const struct bluez_a2dp_sampling_freq a2dp_sbc_samplings[] = {
+	{ 16000, SBC_SAMPLING_FREQ_16000 },
+	{ 32000, SBC_SAMPLING_FREQ_32000 },
+	{ 44100, SBC_SAMPLING_FREQ_44100 },
+	{ 48000, SBC_SAMPLING_FREQ_48000 },
 };
 
 static const a2dp_mpeg_t a2dp_mpeg = {
@@ -78,6 +89,22 @@ static const a2dp_mpeg_t a2dp_mpeg = {
 		MPEG_BIT_RATE_FREE,
 };
 
+static const struct bluez_a2dp_channel_mode a2dp_mpeg_channels[] = {
+	{ BLUEZ_A2DP_CHM_MONO, MPEG_CHANNEL_MODE_MONO },
+	{ BLUEZ_A2DP_CHM_DUAL_CHANNEL, MPEG_CHANNEL_MODE_DUAL_CHANNEL },
+	{ BLUEZ_A2DP_CHM_STEREO, MPEG_CHANNEL_MODE_STEREO },
+	{ BLUEZ_A2DP_CHM_JOINT_STEREO, MPEG_CHANNEL_MODE_JOINT_STEREO },
+};
+
+static const struct bluez_a2dp_sampling_freq a2dp_mpeg_samplings[] = {
+	{ 16000, MPEG_SAMPLING_FREQ_16000 },
+	{ 22050, MPEG_SAMPLING_FREQ_22050 },
+	{ 24000, MPEG_SAMPLING_FREQ_24000 },
+	{ 32000, MPEG_SAMPLING_FREQ_32000 },
+	{ 44100, MPEG_SAMPLING_FREQ_44100 },
+	{ 48000, MPEG_SAMPLING_FREQ_48000 },
+};
+
 static const a2dp_aac_t a2dp_aac = {
 	.object_type =
 		/* NOTE: AAC Long Term Prediction and AAC Scalable are
@@ -85,23 +112,43 @@ static const a2dp_aac_t a2dp_aac = {
 		AAC_OBJECT_TYPE_MPEG2_AAC_LC |
 		AAC_OBJECT_TYPE_MPEG4_AAC_LC,
 	AAC_INIT_FREQUENCY(
-		AAC_SAMPLING_FREQ_8000 |
-		AAC_SAMPLING_FREQ_11025 |
-		AAC_SAMPLING_FREQ_12000 |
-		AAC_SAMPLING_FREQ_16000 |
-		AAC_SAMPLING_FREQ_22050 |
-		AAC_SAMPLING_FREQ_24000 |
-		AAC_SAMPLING_FREQ_32000 |
-		AAC_SAMPLING_FREQ_44100 |
-		AAC_SAMPLING_FREQ_48000 |
-		AAC_SAMPLING_FREQ_64000 |
-		AAC_SAMPLING_FREQ_88200 |
-		AAC_SAMPLING_FREQ_96000)
+			AAC_SAMPLING_FREQ_8000 |
+			AAC_SAMPLING_FREQ_11025 |
+			AAC_SAMPLING_FREQ_12000 |
+			AAC_SAMPLING_FREQ_16000 |
+			AAC_SAMPLING_FREQ_22050 |
+			AAC_SAMPLING_FREQ_24000 |
+			AAC_SAMPLING_FREQ_32000 |
+			AAC_SAMPLING_FREQ_44100 |
+			AAC_SAMPLING_FREQ_48000 |
+			AAC_SAMPLING_FREQ_64000 |
+			AAC_SAMPLING_FREQ_88200 |
+			AAC_SAMPLING_FREQ_96000)
 	.channels =
 		AAC_CHANNELS_1 |
 		AAC_CHANNELS_2,
 	.vbr = 1,
-	AAC_INIT_BITRATE(0xFFFF)
+	AAC_INIT_BITRATE(320000)
+};
+
+static const struct bluez_a2dp_channel_mode a2dp_aac_channels[] = {
+	{ BLUEZ_A2DP_CHM_MONO, AAC_CHANNELS_1 },
+	{ BLUEZ_A2DP_CHM_STEREO, AAC_CHANNELS_2 },
+};
+
+static const struct bluez_a2dp_sampling_freq a2dp_aac_samplings[] = {
+	{ 8000, AAC_SAMPLING_FREQ_8000 },
+	{ 11025, AAC_SAMPLING_FREQ_11025 },
+	{ 12000, AAC_SAMPLING_FREQ_12000 },
+	{ 16000, AAC_SAMPLING_FREQ_16000 },
+	{ 22050, AAC_SAMPLING_FREQ_22050 },
+	{ 24000, AAC_SAMPLING_FREQ_24000 },
+	{ 32000, AAC_SAMPLING_FREQ_32000 },
+	{ 44100, AAC_SAMPLING_FREQ_44100 },
+	{ 48000, AAC_SAMPLING_FREQ_48000 },
+	{ 64000, AAC_SAMPLING_FREQ_64000 },
+	{ 88200, AAC_SAMPLING_FREQ_88200 },
+	{ 96000, AAC_SAMPLING_FREQ_96000 },
 };
 
 static const a2dp_aptx_t a2dp_aptx = {
@@ -118,11 +165,55 @@ static const a2dp_aptx_t a2dp_aptx = {
 		APTX_SAMPLING_FREQ_48000,
 };
 
+static const struct bluez_a2dp_channel_mode a2dp_aptx_channels[] = {
+	{ BLUEZ_A2DP_CHM_STEREO, APTX_CHANNEL_MODE_STEREO },
+};
+
+static const struct bluez_a2dp_sampling_freq a2dp_aptx_samplings[] = {
+	{ 16000, APTX_SAMPLING_FREQ_16000 },
+	{ 32000, APTX_SAMPLING_FREQ_32000 },
+	{ 44100, APTX_SAMPLING_FREQ_44100 },
+	{ 48000, APTX_SAMPLING_FREQ_48000 },
+};
+
+static const a2dp_ldac_t a2dp_ldac = {
+	.info.vendor_id = LDAC_VENDOR_ID,
+	.info.codec_id = LDAC_CODEC_ID,
+	.channel_mode =
+		LDAC_CHANNEL_MODE_MONO |
+		LDAC_CHANNEL_MODE_DUAL_CHANNEL |
+		LDAC_CHANNEL_MODE_STEREO,
+	.frequency =
+		/* NOTE: Used LDAC library does not support
+		 *       frequencies higher than 96 kHz. */
+		LDAC_SAMPLING_FREQ_44100 |
+		LDAC_SAMPLING_FREQ_48000 |
+		LDAC_SAMPLING_FREQ_88200 |
+		LDAC_SAMPLING_FREQ_96000,
+};
+
+static const struct bluez_a2dp_channel_mode a2dp_ldac_channels[] = {
+	{ BLUEZ_A2DP_CHM_MONO, LDAC_CHANNEL_MODE_MONO },
+	{ BLUEZ_A2DP_CHM_DUAL_CHANNEL, LDAC_CHANNEL_MODE_DUAL_CHANNEL },
+	{ BLUEZ_A2DP_CHM_STEREO, LDAC_CHANNEL_MODE_STEREO },
+};
+
+static const struct bluez_a2dp_sampling_freq a2dp_ldac_samplings[] = {
+	{ 44100, LDAC_SAMPLING_FREQ_44100 },
+	{ 48000, LDAC_SAMPLING_FREQ_48000 },
+	{ 88200, LDAC_SAMPLING_FREQ_88200 },
+	{ 96000, LDAC_SAMPLING_FREQ_96000 },
+};
+
 static const struct bluez_a2dp_codec a2dp_codec_source_sbc = {
 	.dir = BLUEZ_A2DP_SOURCE,
 	.id = A2DP_CODEC_SBC,
 	.cfg = &a2dp_sbc,
 	.cfg_size = sizeof(a2dp_sbc),
+	.channels = a2dp_sbc_channels,
+	.channels_size = ARRAYSIZE(a2dp_sbc_channels),
+	.samplings = a2dp_sbc_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_sbc_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_sink_sbc = {
@@ -130,6 +221,10 @@ static const struct bluez_a2dp_codec a2dp_codec_sink_sbc = {
 	.id = A2DP_CODEC_SBC,
 	.cfg = &a2dp_sbc,
 	.cfg_size = sizeof(a2dp_sbc),
+	.channels = a2dp_sbc_channels,
+	.channels_size = ARRAYSIZE(a2dp_sbc_channels),
+	.samplings = a2dp_sbc_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_sbc_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_source_mpeg = {
@@ -137,6 +232,10 @@ static const struct bluez_a2dp_codec a2dp_codec_source_mpeg = {
 	.id = A2DP_CODEC_MPEG12,
 	.cfg = &a2dp_mpeg,
 	.cfg_size = sizeof(a2dp_mpeg),
+	.channels = a2dp_mpeg_channels,
+	.channels_size = ARRAYSIZE(a2dp_mpeg_channels),
+	.samplings = a2dp_mpeg_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_mpeg_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_sink_mpeg = {
@@ -144,6 +243,10 @@ static const struct bluez_a2dp_codec a2dp_codec_sink_mpeg = {
 	.id = A2DP_CODEC_MPEG12,
 	.cfg = &a2dp_mpeg,
 	.cfg_size = sizeof(a2dp_mpeg),
+	.channels = a2dp_mpeg_channels,
+	.channels_size = ARRAYSIZE(a2dp_mpeg_channels),
+	.samplings = a2dp_mpeg_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_mpeg_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_source_aac = {
@@ -151,6 +254,10 @@ static const struct bluez_a2dp_codec a2dp_codec_source_aac = {
 	.id = A2DP_CODEC_MPEG24,
 	.cfg = &a2dp_aac,
 	.cfg_size = sizeof(a2dp_aac),
+	.channels = a2dp_aac_channels,
+	.channels_size = ARRAYSIZE(a2dp_aac_channels),
+	.samplings = a2dp_aac_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_aac_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_sink_aac = {
@@ -158,6 +265,10 @@ static const struct bluez_a2dp_codec a2dp_codec_sink_aac = {
 	.id = A2DP_CODEC_MPEG24,
 	.cfg = &a2dp_aac,
 	.cfg_size = sizeof(a2dp_aac),
+	.channels = a2dp_aac_channels,
+	.channels_size = ARRAYSIZE(a2dp_aac_channels),
+	.samplings = a2dp_aac_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_aac_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_source_aptx = {
@@ -165,6 +276,10 @@ static const struct bluez_a2dp_codec a2dp_codec_source_aptx = {
 	.id = A2DP_CODEC_VENDOR_APTX,
 	.cfg = &a2dp_aptx,
 	.cfg_size = sizeof(a2dp_aptx),
+	.channels = a2dp_aptx_channels,
+	.channels_size = ARRAYSIZE(a2dp_aptx_channels),
+	.samplings = a2dp_aptx_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_aptx_samplings),
 };
 
 static const struct bluez_a2dp_codec a2dp_codec_sink_aptx = {
@@ -172,9 +287,38 @@ static const struct bluez_a2dp_codec a2dp_codec_sink_aptx = {
 	.id = A2DP_CODEC_VENDOR_APTX,
 	.cfg = &a2dp_aptx,
 	.cfg_size = sizeof(a2dp_aptx),
+	.channels = a2dp_aptx_channels,
+	.channels_size = ARRAYSIZE(a2dp_aptx_channels),
+	.samplings = a2dp_aptx_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_aptx_samplings),
+};
+
+static const struct bluez_a2dp_codec a2dp_codec_source_ldac = {
+	.dir = BLUEZ_A2DP_SOURCE,
+	.id = A2DP_CODEC_VENDOR_LDAC,
+	.cfg = &a2dp_ldac,
+	.cfg_size = sizeof(a2dp_ldac),
+	.channels = a2dp_ldac_channels,
+	.channels_size = ARRAYSIZE(a2dp_ldac_channels),
+	.samplings = a2dp_ldac_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_ldac_samplings),
+};
+
+static const struct bluez_a2dp_codec a2dp_codec_sink_ldac = {
+	.dir = BLUEZ_A2DP_SINK,
+	.id = A2DP_CODEC_VENDOR_LDAC,
+	.cfg = &a2dp_ldac,
+	.cfg_size = sizeof(a2dp_ldac),
+	.channels = a2dp_ldac_channels,
+	.channels_size = ARRAYSIZE(a2dp_ldac_channels),
+	.samplings = a2dp_ldac_samplings,
+	.samplings_size = ARRAYSIZE(a2dp_ldac_samplings),
 };
 
 static const struct bluez_a2dp_codec *a2dp_codecs[] = {
+#if ENABLE_LDAC
+	&a2dp_codec_source_ldac,
+#endif
 #if ENABLE_APTX
 	&a2dp_codec_source_aptx,
 #endif

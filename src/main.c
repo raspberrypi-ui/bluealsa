@@ -1,6 +1,6 @@
 /*
  * BlueALSA - main.c
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -9,7 +9,7 @@
  */
 
 #if HAVE_CONFIG_H
-# include "config.h"
+# include <config.h>
 #endif
 
 #include <errno.h>
@@ -25,9 +25,16 @@
 #include <glib.h>
 #include <gio/gio.h>
 
+#if ENABLE_LDAC
+# include <ldacBT.h>
+#endif
+
 #include "bluealsa.h"
 #include "bluez.h"
 #include "ctl.h"
+#if ENABLE_OFONO
+# include "ofono.h"
+#endif
 #include "transport.h"
 #include "utils.h"
 #include "shared/defs.h"
@@ -74,10 +81,15 @@ int main(int argc, char **argv) {
 		{ "profile", required_argument, NULL, 'p' },
 		{ "a2dp-force-mono", no_argument, NULL, 6 },
 		{ "a2dp-force-audio-cd", no_argument, NULL, 7 },
-		{ "a2dp-volume", no_argument, NULL, 8 },
+		{ "a2dp-keep-alive", required_argument, NULL, 8 },
+		{ "a2dp-volume", no_argument, NULL, 9 },
 #if ENABLE_AAC
 		{ "aac-afterburner", no_argument, NULL, 4 },
 		{ "aac-vbr-mode", required_argument, NULL, 5 },
+#endif
+#if ENABLE_LDAC
+		{ "ldac-abr", no_argument, NULL, 10 },
+		{ "ldac-eqmid", required_argument, NULL, 11 },
 #endif
 		{ 0, 0, 0, 0 },
 	};
@@ -141,14 +153,22 @@ int main(int argc, char **argv) {
 					"  -p, --profile=NAME\tenable BT profile\n"
 					"  --a2dp-force-mono\tforce monophonic sound\n"
 					"  --a2dp-force-audio-cd\tforce 44.1 kHz sampling\n"
+					"  --a2dp-keep-alive=SEC\tkeep A2DP transport alive\n"
 					"  --a2dp-volume\t\tcontrol volume natively\n"
 #if ENABLE_AAC
 					"  --aac-afterburner\tenable afterburner\n"
 					"  --aac-vbr-mode=NB\tset VBR mode to NB\n"
 #endif
+#if ENABLE_LDAC
+					"  --ldac-abr\t\tenable adaptive bit rate\n"
+					"  --ldac-eqmid=NB\tset encoder quality to NB\n"
+#endif
 					"\nAvailable BT profiles:\n"
 					"  - a2dp-source\tAdvanced Audio Source (%s)\n"
 					"  - a2dp-sink\tAdvanced Audio Sink (%s)\n"
+#if ENABLE_OFONO
+					"  - hfp-ofono\tHands-Free handled by oFono (hf & ag)\n"
+#endif
 					"  - hfp-hf\tHands-Free (%s)\n"
 					"  - hfp-ag\tHands-Free Audio Gateway (%s)\n"
 					"  - hsp-hs\tHeadset (%s)\n"
@@ -210,6 +230,9 @@ int main(int argc, char **argv) {
 			} map[] = {
 				{ "a2dp-source", &config.enable.a2dp_source },
 				{ "a2dp-sink", &config.enable.a2dp_sink },
+#if ENABLE_OFONO
+				{ "hfp-ofono", &config.enable.hfp_ofono },
+#endif
 				{ "hfp-hf", &config.enable.hfp_hf },
 				{ "hfp-ag", &config.enable.hfp_ag },
 				{ "hsp-hs", &config.enable.hsp_hs },
@@ -236,7 +259,10 @@ int main(int argc, char **argv) {
 		case 7 /* --a2dp-force-audio-cd */ :
 			config.a2dp.force_44100 = true;
 			break;
-		case 8 /* --a2dp-volume */ :
+		case 8 /* --a2dp-keep-alive=SEC */ :
+			config.a2dp.keep_alive = atoi(optarg);
+			break;
+		case 9 /* --a2dp-volume */ :
 			config.a2dp.volume = true;
 			break;
 
@@ -253,10 +279,31 @@ int main(int argc, char **argv) {
 			break;
 #endif
 
+#if ENABLE_LDAC
+		case 10 /* --ldac-abr */ :
+			config.ldac_abr = true;
+			break;
+		case 11 /* --ldac-eqmid=NB */ :
+			config.ldac_eqmid = atoi(optarg);
+			if (config.ldac_eqmid >= LDACBT_EQMID_NUM) {
+				error("Invalid encoder quality index [0, %d]: %s", LDACBT_EQMID_NUM - 1, optarg);
+				return EXIT_FAILURE;
+			}
+			break;
+#endif
+
 		default:
 			fprintf(stderr, "Try '%s --help' for more information.\n", argv[0]);
 			return EXIT_FAILURE;
 		}
+
+#if ENABLE_OFONO
+	if (config.enable.hfp_ofono) {
+		debug("Disabling native HFP due to enabled oFono");
+		config.enable.hfp_ag = false;
+		config.enable.hfp_hf = false;
+	}
+#endif
 
 	/* device list is no longer required */
 	free(hci_devs);
@@ -264,10 +311,8 @@ int main(int argc, char **argv) {
 	/* initialize random number generator */
 	srandom(time(NULL));
 
-	if ((bluealsa_ctl_thread_init()) == -1) {
-		error("Couldn't initialize controller thread: %s", strerror(errno));
+	if ((bluealsa_ctl_thread_init()) == -1)
 		return EXIT_FAILURE;
-	}
 
 	gchar *address;
 	GError *err;
@@ -283,9 +328,13 @@ int main(int argc, char **argv) {
 	}
 
 	bluez_subscribe_signals();
-
 	bluez_register_a2dp();
 	bluez_register_hfp();
+
+#if ENABLE_OFONO
+	ofono_subscribe_signals();
+	ofono_register();
+#endif
 
 	/* In order to receive EPIPE while writing to the pipe whose reading end
 	 * is closed, the SIGPIPE signal has to be handled. For more information
@@ -305,10 +354,9 @@ int main(int argc, char **argv) {
 
 	debug("Exiting main loop");
 
-	/* From all of the cleanup routines, these ones cannot be omitted. We have
-	 * to unlink named sockets, otherwise service will not start any more. */
+	/* From all of the cleanup routines, this one cannot be omitted. We have
+	 * to unlink named socket, otherwise service will not start any more. */
 	bluealsa_ctl_free();
-	bluealsa_config_free();
 
 	return EXIT_SUCCESS;
 }

@@ -1,13 +1,12 @@
 sudo: true
-dist: trusty
+dist: xenial
 
 language: c
 
 addons:
   apt:
-    sources:
-      - sourceline: 'deb http://cz.archive.ubuntu.com/ubuntu xenial main'
     packages:
+      - check
       - libasound2-dev
       - libbluetooth-dev
       - libbsd-dev
@@ -19,8 +18,13 @@ addons:
 
 before_script:
   - mkdir -p m4
+  - sed -i -e 's$/var/run$.$' configure.ac
   - autoreconf --install && mkdir build && cd build
 
 script:
-  - ../configure && make && make check
-  - ../configure --enable-aac && make && make check
+  - ../configure --enable-test && make && make check
+  - cat test/*.log
+  - ../configure --enable-test --enable-debug && make && make check
+  - cat test/*.log
+  - ../configure --enable-test --enable-aac && make && make check
+  - cat test/*.log

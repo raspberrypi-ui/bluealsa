@@ -1,6 +1,6 @@
 /*
  * BlueALSA - bluealsa.h
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -12,10 +12,9 @@
 #define BLUEALSA_BLUEALSA_H
 
 #if HAVE_CONFIG_H
-# include "config.h"
+# include <config.h>
 #endif
 
-#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 
@@ -27,15 +26,8 @@
 
 #include "bluez.h"
 #include "bluez-a2dp.h"
+#include "transport.h"
 #include "shared/ctl-proto.h"
-
-/* Maximal number of clients connected to the controller. */
-#define BLUEALSA_MAX_CLIENTS 7
-
-/* Indexes of special file descriptors in the poll array. */
-#define CTL_IDX_SRV 0
-#define CTL_IDX_EVT 1
-#define __CTL_IDX_MAX 2
 
 struct ba_config {
 
@@ -46,10 +38,11 @@ struct ba_config {
 	struct {
 		bool a2dp_source;
 		bool a2dp_sink;
-		bool hsp_hs;
-		bool hsp_ag;
+		bool hfp_ofono;
 		bool hfp_hf;
 		bool hfp_ag;
+		bool hsp_hs;
+		bool hsp_ag;
 	} enable;
 
 	/* established D-Bus connection */
@@ -65,6 +58,9 @@ struct ba_config {
 	/* registered D-Bus objects */
 	GHashTable *dbus_objects;
 
+	/* opened null device */
+	int null_fd;
+
 	/* audio group ID */
 	gid_t gid_audio;
 
@@ -74,9 +70,10 @@ struct ba_config {
 		bool socket_created;
 		bool thread_created;
 
-		struct pollfd pfds[__CTL_IDX_MAX + BLUEALSA_MAX_CLIENTS];
+		/* special file descriptors + connected clients */
+		GArray *pfds;
 		/* event subscriptions for connected clients */
-		enum ba_event subs[BLUEALSA_MAX_CLIENTS];
+		GArray *subs;
 
 		/* PIPE for transferring events */
 		int evt[2];
@@ -110,11 +107,21 @@ struct ba_config {
 		 * to force lower sampling in order to save Bluetooth bandwidth. */
 		bool force_44100;
 
+		/* The number of seconds for keeping A2DP transport alive after PCM has
+		 * been closed. One might set this value to negative number for infinite
+		 * time. This option applies for the source profile only. */
+		int keep_alive;
+
 	} a2dp;
 
 #if ENABLE_AAC
 	bool aac_afterburner;
 	uint8_t aac_vbr_mode;
+#endif
+
+#if ENABLE_LDAC
+	bool ldac_abr;
+	uint8_t ldac_eqmid;
 #endif
 
 };
@@ -133,6 +140,17 @@ struct ba_dbus_object {
 extern struct ba_config config;
 
 int bluealsa_config_init(void);
-void bluealsa_config_free(void);
+
+#define bluealsa_devpool_mutex_lock() \
+	pthread_mutex_lock(&config.devices_mutex)
+#define bluealsa_devpool_mutex_unlock() \
+	pthread_mutex_unlock(&config.devices_mutex)
+
+#define bluealsa_device_insert(key, device) \
+	g_hash_table_insert(config.devices, g_strdup(key), device)
+#define bluealsa_device_lookup(key) \
+	((struct ba_device *)g_hash_table_lookup(config.devices, key))
+#define bluealsa_device_remove(key) \
+	g_hash_table_remove(config.devices, key)
 
 #endif

@@ -50,8 +50,12 @@ static void vlog(int priority, const char *format, va_list ap) {
 	 * has to be temporally disabled. */
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
 
-	if (_syslog)
-		vsyslog(priority, format, ap);
+	if (_syslog) {
+		va_list ap_syslog;
+		va_copy(ap_syslog, ap);
+		vsyslog(priority, format, ap_syslog);
+		va_end(ap_syslog);
+	}
 
 	flockfile(stderr);
 
@@ -136,7 +140,7 @@ static int printf_arginfo(const struct printf_info *info, size_t n, int *argtype
 	return *size = 1;
 }
 
-static int printf_output(FILE *stream, const struct printf_info *info, const void *const *args) {
+static int printf_output(FILE *stream, const struct printf_info *info, const void * const *args) {
 
 	unsigned int v = *(unsigned int *)(args[0]);
 	bool output = false;

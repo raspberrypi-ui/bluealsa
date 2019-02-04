@@ -48,8 +48,9 @@ struct ctl_elem_update {
 struct bluealsa_ctl {
 	snd_ctl_ext_t ext;
 
-	/* bluealsa socket */
+	/* bluealsa sockets */
 	int fd;
+	int event_fd;
 
 	/* if true, show battery meter */
 	bool battery;
@@ -107,7 +108,7 @@ static void bluealsa_set_elem_name(struct ctl_elem *elem, int id) {
 	char no[8] = "";
 
 	if (id != -1) {
-		sprintf(no, " #%d", id + 1);
+		sprintf(no, " #%u", id + 1);
 		len -= strlen(no);
 	}
 
@@ -119,7 +120,7 @@ static void bluealsa_set_elem_name(struct ctl_elem *elem, int id) {
 	}
 	else if (transport != NULL) {
 		/* avoid name duplication by adding profile suffixes */
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			break;
 		case BA_PCM_TYPE_A2DP:
@@ -174,7 +175,7 @@ static int bluealsa_ctl_elem_cmp(const struct ctl_elem *e1, const struct ctl_ele
 		updated |= d1->battery_level != d2->battery_level;
 		break;
 	case CTL_ELEM_TYPE_SWITCH:
-		switch (t1->type) {
+		switch (BA_PCM_TYPE(t1->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -191,7 +192,7 @@ static int bluealsa_ctl_elem_cmp(const struct ctl_elem *e1, const struct ctl_ele
 		}
 		break;
 	case CTL_ELEM_TYPE_VOLUME:
-		switch (t1->type) {
+		switch (BA_PCM_TYPE(t1->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -219,6 +220,7 @@ static int bluealsa_ctl_elem_update_cmp(const void *p1, const void *p2) {
 static void bluealsa_close(snd_ctl_ext_t *ext) {
 	struct bluealsa_ctl *ctl = (struct bluealsa_ctl *)ext->private_data;
 	close(ctl->fd);
+	close(ctl->event_fd);
 	free(ctl->devices);
 	free(ctl->transports);
 	free(ctl->elems);
@@ -251,14 +253,15 @@ static int bluealsa_elem_count(snd_ctl_ext_t *ext) {
 		/* Every stream has two controls associated to itself - volume adjustment
 		 * and mute switch. A2DP transport contains only one stream. However, SCO
 		 * transport represent both streams - playback and capture. */
-		switch (ctl->transports[i].type) {
+		switch (BA_PCM_TYPE(ctl->transports[i].type)) {
 		case BA_PCM_TYPE_NULL:
 			continue;
 		case BA_PCM_TYPE_A2DP:
 			count += 2;
 			break;
 		case BA_PCM_TYPE_SCO:
-			count += 4;
+			if (ctl->transports[i].codec != 0)
+				count += 4;
 			break;
 		}
 	}
@@ -275,12 +278,11 @@ static int bluealsa_elem_count(snd_ctl_ext_t *ext) {
 		size_t ii;
 
 		/* get device structure for given transport */
-		for (ii = 0; ii < ctl->devices_count; ii++) {
+		for (ii = 0; ii < ctl->devices_count; ii++)
 			if (bacmp(&ctl->devices[ii].addr, &transport->addr) == 0) {
 				device = &ctl->devices[ii];
 				break;
 			}
-		}
 
 		/* If the timing is right, the device list might not contain all devices.
 		 * It will happen, when between the get devices and get transports calls
@@ -288,7 +290,7 @@ static int bluealsa_elem_count(snd_ctl_ext_t *ext) {
 		if (device == NULL)
 			continue;
 
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			break;
 
@@ -297,20 +299,23 @@ static int bluealsa_elem_count(snd_ctl_ext_t *ext) {
 			ctl->elems[count].type = CTL_ELEM_TYPE_VOLUME;
 			ctl->elems[count].device = device;
 			ctl->elems[count].transport = transport;
-			ctl->elems[count].playback = transport->stream == BA_PCM_STREAM_PLAYBACK;
+			ctl->elems[count].playback = transport->type & BA_PCM_STREAM_PLAYBACK;
 			bluealsa_set_elem_name(&ctl->elems[count], -1);
 			count++;
 
 			ctl->elems[count].type = CTL_ELEM_TYPE_SWITCH;
 			ctl->elems[count].device = device;
 			ctl->elems[count].transport = transport;
-			ctl->elems[count].playback = transport->stream == BA_PCM_STREAM_PLAYBACK;
+			ctl->elems[count].playback = transport->type & BA_PCM_STREAM_PLAYBACK;
 			bluealsa_set_elem_name(&ctl->elems[count], -1);
 			count++;
 
 			break;
 
 		case BA_PCM_TYPE_SCO:
+
+			if (ctl->transports[i].codec == 0)
+				break;
 
 			ctl->elems[count].type = CTL_ELEM_TYPE_VOLUME;
 			ctl->elems[count].device = device;
@@ -462,7 +467,7 @@ static int bluealsa_get_integer_info(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key,
 	case CTL_ELEM_TYPE_SWITCH:
 		return -EINVAL;
 	case CTL_ELEM_TYPE_VOLUME:
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -495,7 +500,7 @@ static int bluealsa_read_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, long
 		value[0] = device->battery_level;
 		break;
 	case CTL_ELEM_TYPE_SWITCH:
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -512,7 +517,7 @@ static int bluealsa_read_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, long
 		}
 		break;
 	case CTL_ELEM_TYPE_VOLUME:
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -550,7 +555,7 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 		/* this element should be read-only */
 		return -EINVAL;
 	case CTL_ELEM_TYPE_SWITCH:
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -567,7 +572,7 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 		}
 		break;
 	case CTL_ELEM_TYPE_VOLUME:
-		switch (transport->type) {
+		switch (BA_PCM_TYPE(transport->type)) {
 		case BA_PCM_TYPE_NULL:
 			return -EINVAL;
 		case BA_PCM_TYPE_A2DP:
@@ -594,7 +599,7 @@ static int bluealsa_write_integer(snd_ctl_ext_t *ext, snd_ctl_ext_key_t key, lon
 
 static void bluealsa_subscribe_events(snd_ctl_ext_t *ext, int subscribe) {
 	struct bluealsa_ctl *ctl = (struct bluealsa_ctl *)ext->private_data;
-	if (bluealsa_subscribe(ctl->fd, subscribe ? 0xFFFF : 0) == -1)
+	if (bluealsa_event_subscribe(ctl->event_fd, subscribe ? 0xFFFF : 0) == -1)
 		SNDERR("BlueALSA subscription failed: %s", strerror(errno));
 }
 
@@ -622,7 +627,7 @@ static int bluealsa_read_event(snd_ctl_ext_t *ext, snd_ctl_elem_id_t *id, unsign
 	/* This code reads events from the socket until the EAGAIN is returned.
 	 * Since EAGAIN is returned when operation would block (there is no more
 	 * data to read), we are compliant with the ALSA specification. */
-	while ((ret = recv(ctl->fd, &event, sizeof(event), MSG_DONTWAIT)) == -1 && errno == EINTR)
+	while ((ret = recv(ctl->event_fd, &event, sizeof(event), MSG_DONTWAIT)) == -1 && errno == EINTR)
 		continue;
 	if (ret == -1)
 		return -errno;
@@ -747,7 +752,8 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 	if ((ctl = calloc(1, sizeof(*ctl))) == NULL)
 		return -ENOMEM;
 
-	if ((ctl->fd = bluealsa_open(interface)) == -1) {
+	if ((ctl->fd = bluealsa_open(interface)) == -1 ||
+			(ctl->event_fd = bluealsa_open(interface)) == -1) {
 		SNDERR("BlueALSA connection failed: %s", strerror(errno));
 		ret = -errno;
 		goto fail;
@@ -764,7 +770,7 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 
 	ctl->ext.callback = &bluealsa_snd_ctl_ext_callback;
 	ctl->ext.private_data = ctl;
-	ctl->ext.poll_fd = ctl->fd;
+	ctl->ext.poll_fd = ctl->event_fd;
 
 	if ((ret = snd_ctl_ext_create(&ctl->ext, name, mode)) < 0)
 		goto fail;
@@ -775,6 +781,8 @@ SND_CTL_PLUGIN_DEFINE_FUNC(bluealsa) {
 fail:
 	if (ctl->fd != -1)
 		close(ctl->fd);
+	if (ctl->event_fd != -1)
+		close(ctl->event_fd);
 	free(ctl);
 	return ret;
 }

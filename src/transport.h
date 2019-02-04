@@ -1,6 +1,6 @@
 /*
  * BlueALSA - transport.h
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -10,6 +10,10 @@
 
 #ifndef BLUEALSA_TRANSPORT_H_
 #define BLUEALSA_TRANSPORT_H_
+
+#if HAVE_CONFIG_H
+# include <config.h>
+#endif
 
 #include <pthread.h>
 #include <stdbool.h>
@@ -39,11 +43,13 @@ enum ba_transport_state {
 };
 
 enum ba_transport_signal {
+	TRANSPORT_BT_OPEN,
 	TRANSPORT_PCM_OPEN,
 	TRANSPORT_PCM_CLOSE,
 	TRANSPORT_PCM_PAUSE,
 	TRANSPORT_PCM_RESUME,
 	TRANSPORT_PCM_SYNC,
+	TRANSPORT_PCM_DROP,
 	TRANSPORT_SET_VOLUME,
 	TRANSPORT_SEND_RFCOMM,
 };
@@ -82,17 +88,10 @@ struct ba_device {
 };
 
 struct ba_pcm {
-
+	/* FIFO file descriptor */
 	int fd;
-
-	/* client identifier (most likely client socket file descriptor) used
-	 * by the PCM client lookup function - transport_lookup_pcm_client() */
+	/* associated client */
 	int client;
-
-	/* variables used for PCM synchronization */
-	pthread_cond_t drained;
-	pthread_mutex_t drained_mn;
-
 };
 
 struct ba_transport {
@@ -113,6 +112,10 @@ struct ba_transport {
 	 * of the codec field contains the lowest byte of the vendor ID. */
 	enum bluetooth_profile profile;
 	uint16_t codec;
+
+	/* This mutex shall guard modifications of the critical sections in this
+	 * transport structure, e.g. thread creation/termination. */
+	pthread_mutex_t mutex;
 
 	/* IO thread - actual transport layer */
 	enum ba_transport_state state;
@@ -156,6 +159,17 @@ struct ba_transport {
 			uint8_t *cconfig;
 			size_t cconfig_size;
 
+			/* Value reported by the ioctl(TIOCOUTQ) when the output buffer is
+			 * empty. Somehow this ioctl call reports "available" buffer space.
+			 * So, in order to get the number of bytes in the queue buffer, we
+			 * have to subtract the initial value from values returned by
+			 * subsequent ioctl() calls. */
+			int bt_fd_coutq_init;
+
+			/* playback synchronization */
+			pthread_mutex_t drained_mtx;
+			pthread_cond_t drained;
+
 		} a2dp;
 
 		struct {
@@ -171,6 +185,9 @@ struct ba_transport {
 		} rfcomm;
 
 		struct {
+
+			/* if true, SCO is handled by oFono */
+			bool ofono;
 
 			/* parent RFCOMM transport */
 			struct ba_transport *rfcomm;
@@ -188,21 +205,25 @@ struct ba_transport {
 			struct ba_pcm spk_pcm;
 			struct ba_pcm mic_pcm;
 
+			/* playback synchronization */
+			pthread_mutex_t spk_drained_mtx;
+			pthread_cond_t spk_drained;
+
 		} sco;
 
 	};
 
-	/* callback function for self-management */
+	/* indicates cleanup lock */
+	bool cleanup_lock;
+
+	/* callback functions for self-management */
+	int (*acquire)(struct ba_transport *);
 	int (*release)(struct ba_transport *);
 
 };
 
 struct ba_device *device_new(int hci_dev_id, const bdaddr_t *addr, const char *name);
 void device_free(struct ba_device *d);
-
-struct ba_device *device_get(GHashTable *devices, const char *key);
-struct ba_device *device_lookup(GHashTable *devices, const char *key);
-bool device_remove(GHashTable *devices, const char *key);
 
 void device_set_battery_level(struct ba_device *d, uint8_t value);
 
@@ -226,10 +247,15 @@ struct ba_transport *transport_new_rfcomm(
 		const char *dbus_owner,
 		const char *dbus_path,
 		enum bluetooth_profile profile);
+struct ba_transport *transport_new_sco(
+		struct ba_device *device,
+		const char *dbus_owner,
+		const char *dbus_path,
+		enum bluetooth_profile profile,
+		uint16_t codec);
 void transport_free(struct ba_transport *t);
 
 struct ba_transport *transport_lookup(GHashTable *devices, const char *dbus_path);
-struct ba_transport *transport_lookup_pcm_client(GHashTable *devices, int client);
 bool transport_remove(GHashTable *devices, const char *dbus_path);
 
 int transport_send_signal(struct ba_transport *t, enum ba_transport_signal sig);
@@ -238,24 +264,14 @@ int transport_send_rfcomm(struct ba_transport *t, const char command[32]);
 unsigned int transport_get_channels(const struct ba_transport *t);
 unsigned int transport_get_sampling(const struct ba_transport *t);
 
-int transport_set_volume(struct ba_transport *t, uint8_t ch1_muted, uint8_t ch2_muted,
-		uint8_t ch1_volume, uint8_t ch2_volume);
-
 int transport_set_state(struct ba_transport *t, enum ba_transport_state state);
-int transport_set_state_from_string(struct ba_transport *t, const char *state);
 
 int transport_drain_pcm(struct ba_transport *t);
-
-int transport_acquire_bt_a2dp(struct ba_transport *t);
-int transport_release_bt_a2dp(struct ba_transport *t);
-
-int transport_release_bt_rfcomm(struct ba_transport *t);
-
-int transport_acquire_bt_sco(struct ba_transport *t);
-int transport_release_bt_sco(struct ba_transport *t);
-
 int transport_release_pcm(struct ba_pcm *pcm);
 
-void transport_pthread_cleanup(void *arg);
+void transport_pthread_cancel(pthread_t thread);
+void transport_pthread_cleanup(struct ba_transport *t);
+int transport_pthread_cleanup_lock(struct ba_transport *t);
+int transport_pthread_cleanup_unlock(struct ba_transport *t);
 
 #endif

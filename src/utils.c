@@ -18,6 +18,10 @@
 #include <bluetooth/hci_lib.h>
 #include <bluetooth/sco.h>
 
+#if ENABLE_LDAC
+# include "ldacBT.h"
+#endif
+
 #include "a2dp-codecs.h"
 #include "bluez.h"
 #include "shared/log.h"
@@ -158,6 +162,10 @@ const char *g_dbus_get_profile_object_path(enum bluetooth_profile profile, uint1
 		case A2DP_CODEC_VENDOR_APTX:
 			return "/A2DP/APTX/Source";
 #endif
+#if ENABLE_LDAC
+		case A2DP_CODEC_VENDOR_LDAC:
+			return "/A2DP/LDAC/Source";
+#endif
 		default:
 			warn("Unsupported A2DP codec: %#x", codec);
 			return "/A2DP/Source";
@@ -177,6 +185,10 @@ const char *g_dbus_get_profile_object_path(enum bluetooth_profile profile, uint1
 #if ENABLE_APTX
 		case A2DP_CODEC_VENDOR_APTX:
 			return "/A2DP/APTX/Sink";
+#endif
+#if ENABLE_LDAC
+		case A2DP_CODEC_VENDOR_LDAC:
+			return "/A2DP/LDAC/Sink";
 #endif
 		default:
 			warn("Unsupported A2DP codec: %#x", codec);
@@ -222,33 +234,6 @@ enum bluetooth_profile g_dbus_object_path_to_profile(const char *path) {
 			return BLUETOOTH_PROFILE_HFP_AG;
 	}
 	return BLUETOOTH_PROFILE_NULL;
-}
-
-/**
- * Convert BlueZ D-Bus object path into a A2DP codec.
- *
- * Prior to the usage, make sure, that the path is for the A2DP profile.
- * To do so, use the g_dbus_object_path_to_profile() function.
- *
- * @param path BlueZ D-Bus object path.
- * @return On success this function returns Bluetooth audio codec. If object
- *   path cannot be recognize, vendor codec is returned. */
-uint16_t g_dbus_object_path_to_a2dp_codec(const char *path) {
-	if (strncmp(path + 5, "/SBC", 4) == 0)
-		return A2DP_CODEC_SBC;
-#if ENABLE_MPEG
-	if (strncmp(path + 5, "/MPEG12", 7) == 0)
-		return A2DP_CODEC_MPEG12;
-#endif
-#if ENABLE_AAC
-	if (strncmp(path + 5, "/MPEG24", 7) == 0)
-		return A2DP_CODEC_MPEG24;
-#endif
-#if ENABLE_APTX
-	if (strncmp(path + 5, "/APTX", 5) == 0)
-		return A2DP_CODEC_VENDOR_APTX;
-#endif
-	return A2DP_CODEC_VENDOR;
 }
 
 /**
@@ -585,6 +570,50 @@ const char *aacenc_strerror(AACENC_ERROR err) {
 		return "Encoding error";
 	case AACENC_ENCODE_EOF:
 		return "End of file";
+	default:
+		debug("Unknown error code: %#x", err);
+		return "Unknown error";
+	}
+}
+#endif
+
+#if ENABLE_LDAC
+/**
+ * Get string representation of the LDAC error code.
+ *
+ * @param error LDAC error code.
+ * @return Human-readable string. */
+const char *ldacBT_strerror(int err) {
+	switch (LDACBT_API_ERR(err)) {
+	case LDACBT_ERR_NONE:
+		return "Success";
+	case LDACBT_ERR_ASSERT_SAMPLING_FREQ:
+	case LDACBT_ERR_ASSERT_SUP_SAMPLING_FREQ:
+	case LDACBT_ERR_CHECK_SAMPLING_FREQ:
+		return "Invalid sample rate";
+	case LDACBT_ERR_ASSERT_CHANNEL_CONFIG:
+	case LDACBT_ERR_CHECK_CHANNEL_CONFIG:
+		return "Invalid channel config";
+	case LDACBT_ERR_ASSERT_FRAME_LENGTH:
+	case LDACBT_ERR_ASSERT_SUP_FRAME_LENGTH:
+	case LDACBT_ERR_ASSERT_FRAME_STATUS:
+		return "Invalid frame status";
+	case LDACBT_ERR_ASSERT_NSHIFT:
+		return "Invalid N-shift";
+	case LDACBT_ERR_ASSERT_CHANNEL_MODE:
+		return "Invalid channel mode";
+	case LDACBT_ERR_ALTER_EQMID_LIMITED:
+		return "EQMID limited";
+	case LDACBT_ERR_HANDLE_NOT_INIT:
+		return "Invalid handle";
+	case LDACBT_ERR_ILL_EQMID:
+		return "Unsupported EQMID";
+	case LDACBT_ERR_ILL_SAMPLING_FREQ:
+		return "Unsupported sample rate";
+	case LDACBT_ERR_ILL_NUM_CHANNEL:
+		return "Unsupported channels";
+	case LDACBT_ERR_ILL_MTU_SIZE:
+		return "Unsupported MTU";
 	default:
 		debug("Unknown error code: %#x", err);
 		return "Unknown error";
