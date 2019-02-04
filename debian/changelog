@@ -1,3 +1,9 @@
+bluealsa (0.10) unstable; urgency=medium
+
+  * Merge in recent changes to original bluezalsa
+
+ -- Simon Long <simon@raspberrypi.org>  Mon, 04 Feb 2019 15:07:19 +0000
+
 bluealsa (0.9) stretch; urgency=medium
 
   * Change = to += in udev rule
