@@ -1,6 +1,6 @@
 /*
  * BlueALSA - rfcomm.c
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *               2017 Juha Kuikka
  *
  * This file is a part of bluez-alsa.
@@ -13,12 +13,16 @@
 
 #include <errno.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
+#include "ba-device.h"
+#include "ba-transport.h"
 #include "bluealsa.h"
-#include "ctl.h"
+#include "bluealsa-dbus.h"
 #include "utils.h"
 #include "shared/defs.h"
 #include "shared/log.h"
@@ -59,6 +63,11 @@ retry:
 		if ((len = read(fd, buffer, sizeof(reader->buffer))) == -1) {
 			if (errno == EINTR)
 				goto retry;
+			return -1;
+		}
+
+		if (len == 0) {
+			errno = ECONNRESET;
 			return -1;
 		}
 
@@ -191,14 +200,17 @@ static int rfcomm_handler_cind_resp_test_cb(struct rfcomm_conn *c, const struct 
 static int rfcomm_handler_cind_resp_get_cb(struct rfcomm_conn *c, const struct bt_at *at) {
 
 	struct ba_transport * const t = c->t;
+	struct ba_device * const d = t->d;
 	char *tmp = at->value;
 	size_t i;
 
 	/* parse response for the +CIND GET command */
 	for (i = 0; i < ARRAYSIZE(c->hfp_ind_map); i++) {
 		t->rfcomm.hfp_inds[c->hfp_ind_map[i]] = atoi(tmp);
-		if (c->hfp_ind_map[i] == HFP_IND_BATTCHG)
-			device_set_battery_level(t->device, atoi(tmp) * 100 / 5);
+		if (c->hfp_ind_map[i] == HFP_IND_BATTCHG) {
+			d->battery_level = atoi(tmp) * 100 / 5;
+			bluealsa_dbus_transport_update(t->rfcomm.sco, BA_DBUS_TRANSPORT_UPDATE_BATTERY);
+		}
 		if ((tmp = strchr(tmp, ',')) == NULL)
 			break;
 		tmp += 1;
@@ -230,6 +242,7 @@ static int rfcomm_handler_cmer_set_cb(struct rfcomm_conn *c, const struct bt_at 
 static int rfcomm_handler_ciev_resp_cb(struct rfcomm_conn *c, const struct bt_at *at) {
 
 	struct ba_transport * const t = c->t;
+	struct ba_device * const d = t->d;
 	unsigned int index;
 	unsigned int value;
 
@@ -238,10 +251,11 @@ static int rfcomm_handler_ciev_resp_cb(struct rfcomm_conn *c, const struct bt_at
 		switch (c->hfp_ind_map[index - 1]) {
 		case HFP_IND_CALL:
 		case HFP_IND_CALLSETUP:
-			transport_send_signal(t->rfcomm.sco, TRANSPORT_BT_OPEN);
+			ba_transport_send_signal(t->rfcomm.sco, TRANSPORT_PING);
 			break;
 		case HFP_IND_BATTCHG:
-			device_set_battery_level(t->device, value * 100 / 5);
+			d->battery_level = value * 100 / 5;
+			bluealsa_dbus_transport_update(t->rfcomm.sco, BA_DBUS_TRANSPORT_UPDATE_BATTERY);
 			break;
 		default:
 			break;
@@ -275,7 +289,7 @@ static int rfcomm_handler_brsf_set_cb(struct rfcomm_conn *c, const struct bt_at 
 	/* Codec negotiation is not supported in the HF, hence no
 	 * wideband audio support. AT+BAC will not be sent. */
 	if (!(t->rfcomm.hfp_features & HFP_HF_FEAT_CODEC))
-		t->rfcomm.sco->codec = HFP_CODEC_CVSD;
+		t->rfcomm.sco->type.codec = HFP_CODEC_CVSD;
 
 	sprintf(tmp, "%u", config.hfp.features_rfcomm_ag);
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, "+BRSF", tmp) == -1)
@@ -298,7 +312,7 @@ static int rfcomm_handler_brsf_resp_cb(struct rfcomm_conn *c, const struct bt_at
 
 	/* codec negotiation is not supported in the AG */
 	if (!(t->rfcomm.hfp_features & HFP_AG_FEAT_CODEC))
-		t->rfcomm.sco->codec = HFP_CODEC_CVSD;
+		t->rfcomm.sco->type.codec = HFP_CODEC_CVSD;
 
 	if (c->state < HFP_SLC_BRSF_SET)
 		rfcomm_set_hfp_state(c, HFP_SLC_BRSF_SET);
@@ -316,8 +330,7 @@ static int rfcomm_handler_vgm_set_cb(struct rfcomm_conn *c, const struct bt_at *
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "OK") == -1)
 		return -1;
 
-	bluealsa_ctl_send_event(BA_EVENT_VOLUME_CHANGED, &t->device->addr,
-			BA_PCM_TYPE_SCO | BA_PCM_STREAM_CAPTURE);
+	bluealsa_dbus_transport_update(t->rfcomm.sco, BA_DBUS_TRANSPORT_UPDATE_VOLUME);
 	return 0;
 }
 
@@ -331,8 +344,7 @@ static int rfcomm_handler_vgs_set_cb(struct rfcomm_conn *c, const struct bt_at *
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "OK") == -1)
 		return -1;
 
-	bluealsa_ctl_send_event(BA_EVENT_VOLUME_CHANGED, &t->device->addr,
-			BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK);
+	bluealsa_dbus_transport_update(t->rfcomm.sco, BA_DBUS_TRANSPORT_UPDATE_VOLUME);
 	return 0;
 }
 
@@ -354,8 +366,8 @@ static int rfcomm_handler_bcs_set_cb(struct rfcomm_conn *c, const struct bt_at *
 	struct ba_transport * const t = c->t;
 	const int fd = t->bt_fd;
 
-	if (t->rfcomm.sco->codec != atoi(at->value)) {
-		warn("Codec not acknowledged: %d != %s", t->rfcomm.sco->codec, at->value);
+	if (t->rfcomm.sco->type.codec != atoi(at->value)) {
+		warn("Codec not acknowledged: %d != %s", t->rfcomm.sco->type.codec, at->value);
 		if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "ERROR") == -1)
 			return -1;
 		return 0;
@@ -371,13 +383,14 @@ static int rfcomm_handler_bcs_set_cb(struct rfcomm_conn *c, const struct bt_at *
 }
 
 static int rfcomm_handler_resp_bcs_ok_cb(struct rfcomm_conn *c, const struct bt_at *at) {
+	struct ba_transport * const t = c->t;
 	if (rfcomm_handler_resp_ok_cb(c, at) != 0)
 		return -1;
 	/* When codec selection is completed, notify connected clients, that
 	 * transport has been changed. Note, that this event might be emitted
 	 * for an active transport - codec switching. */
-	bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &c->t->device->addr,
-			BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
+	bluealsa_dbus_transport_update(t->rfcomm.sco,
+			BA_DBUS_TRANSPORT_UPDATE_SAMPLING | BA_DBUS_TRANSPORT_UPDATE_CODEC);
 	return 0;
 }
 
@@ -390,7 +403,7 @@ static int rfcomm_handler_bcs_resp_cb(struct rfcomm_conn *c, const struct bt_at 
 	struct ba_transport * const t = c->t;
 	const int fd = t->bt_fd;
 
-	t->rfcomm.sco->codec = atoi(at->value);
+	t->rfcomm.sco->type.codec = atoi(at->value);
 	if (rfcomm_write_at(fd, AT_TYPE_CMD_SET, "+BCS", at->value) == -1)
 		return -1;
 
@@ -405,11 +418,17 @@ static int rfcomm_handler_bcs_resp_cb(struct rfcomm_conn *c, const struct bt_at 
 /**
  * SET: Bluetooth Available Codecs */
 static int rfcomm_handler_bac_set_cb(struct rfcomm_conn *c, const struct bt_at *at) {
-	(void)at;
-	const int fd = c->t->bt_fd;
 
-	/* In case some headsets send BAC even if we don't advertise
-	 * support for it. In such case, just OK and ignore. */
+	const int fd = c->t->bt_fd;
+	char *tmp = at->value - 1;
+
+	do {
+		tmp += 1;
+#if ENABLE_MSBC
+		if (atoi(tmp) == HFP_CODEC_MSBC)
+			c->msbc = true;
+#endif
+	} while ((tmp = strchr(tmp, ',')) != NULL);
 
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "OK") == -1)
 		return -1;
@@ -425,7 +444,7 @@ static int rfcomm_handler_bac_set_cb(struct rfcomm_conn *c, const struct bt_at *
 static int rfcomm_handler_iphoneaccev_set_cb(struct rfcomm_conn *c, const struct bt_at *at) {
 
 	struct ba_transport * const t = c->t;
-	struct ba_device * const d = t->device;
+	struct ba_device * const d = t->d;
 	const int fd = t->bt_fd;
 
 	char *ptr = at->value;
@@ -435,8 +454,10 @@ static int rfcomm_handler_iphoneaccev_set_cb(struct rfcomm_conn *c, const struct
 	while (count-- && ptr != NULL)
 		switch (tmp = *strsep(&ptr, ",")) {
 		case '1':
-			if (ptr != NULL)
-				device_set_battery_level(d, atoi(strsep(&ptr, ",")) * 100 / 9);
+			if (ptr != NULL) {
+				d->battery_level = atoi(strsep(&ptr, ",")) * 100 / 9;
+				bluealsa_dbus_transport_update(t->rfcomm.sco, BA_DBUS_TRANSPORT_UPDATE_BATTERY);
+			}
 			break;
 		case '2':
 			if (ptr != NULL)
@@ -457,7 +478,7 @@ static int rfcomm_handler_iphoneaccev_set_cb(struct rfcomm_conn *c, const struct
 static int rfcomm_handler_xapl_set_cb(struct rfcomm_conn *c, const struct bt_at *at) {
 
 	struct ba_transport * const t = c->t;
-	struct ba_device * const d = t->device;
+	struct ba_device * const d = t->d;
 	const int fd = t->bt_fd;
 
 	const char *resp = "+XAPL=BlueALSA,0";
@@ -555,7 +576,8 @@ void *rfcomm_thread(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_cleanup_push(PTHREAD_CLEANUP(transport_pthread_cleanup), t);
+	pthread_setname_np(pthread_self(), "ba-rfcomm");
+	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup), t);
 
 	/* initialize structure used for synchronization */
 	struct rfcomm_conn conn = {
@@ -570,10 +592,10 @@ void *rfcomm_thread(void *arg) {
 	struct pollfd pfds[] = {
 		{ t->sig_fd[0], POLLIN, 0 },
 		{ t->bt_fd, POLLIN, 0 },
+		{ -1, POLLIN, 0 },
 	};
 
-	debug("Starting RFCOMM loop: %s",
-			bluetooth_profile_to_string(t->profile));
+	debug("Starting loop: %s", ba_transport_type_to_string(t->type));
 	for (;;) {
 
 		/* During normal operation, RFCOMM should block indefinitely. However,
@@ -585,7 +607,7 @@ void *rfcomm_thread(void *arg) {
 		int timeout = -1;
 
 		rfcomm_callback *callback;
-		char tmp[16];
+		char tmp[256];
 
 		if (conn.state != HFP_CONNECTED) {
 
@@ -603,7 +625,7 @@ void *rfcomm_thread(void *arg) {
 				goto ioerror;
 			}
 
-			if (t->profile == BLUETOOTH_PROFILE_HFP_HF)
+			if (t->type.profile & BA_TRANSPORT_PROFILE_HFP_HF)
 				switch (conn.state) {
 				case HFP_DISCONNECTED:
 					sprintf(tmp, "%u", config.hfp.features_rfcomm_hf);
@@ -616,7 +638,12 @@ void *rfcomm_thread(void *arg) {
 					break;
 				case HFP_SLC_BRSF_SET_OK:
 					if (t->rfcomm.hfp_features & HFP_AG_FEAT_CODEC) {
+#if ENABLE_MSBC
+						/* advertise, that we are supporting CVSD (1) and mSBC (2) */
+						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_SET, "+BAC", "1,2") == -1)
+#else
 						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_SET, "+BAC", "1") == -1)
+#endif
 							goto ioerror;
 						conn.handler = &rfcomm_handler_resp_ok;
 						break;
@@ -658,11 +685,11 @@ void *rfcomm_thread(void *arg) {
 					rfcomm_set_hfp_state(&conn, HFP_CONNECTED);
 					/* fall-through */
 				case HFP_CONNECTED:
-					bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &t->device->addr,
-							BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
+					bluealsa_dbus_transport_update(t->rfcomm.sco,
+							BA_DBUS_TRANSPORT_UPDATE_SAMPLING | BA_DBUS_TRANSPORT_UPDATE_CODEC);
 				}
 
-			if (t->profile == BLUETOOTH_PROFILE_HFP_AG)
+			if (t->type.profile & BA_TRANSPORT_PROFILE_HFP_AG)
 				switch (conn.state) {
 				case HFP_DISCONNECTED:
 				case HFP_SLC_BRSF_SET:
@@ -678,9 +705,15 @@ void *rfcomm_thread(void *arg) {
 					/* fall-through */
 				case HFP_SLC_CONNECTED:
 					if (t->rfcomm.hfp_features & HFP_HF_FEAT_CODEC) {
+#if ENABLE_MSBC
+						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RESP, "+BCS", conn.msbc ? "2" : "1") == -1)
+							goto ioerror;
+						t->rfcomm.sco->type.codec = conn.msbc ? HFP_CODEC_MSBC : HFP_CODEC_CVSD;
+#else
 						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RESP, "+BCS", "1") == -1)
 							goto ioerror;
-						t->rfcomm.sco->codec = HFP_CODEC_CVSD;
+						t->rfcomm.sco->type.codec = HFP_CODEC_CVSD;
+#endif
 						conn.handler = &rfcomm_handler_bcs_set;
 						break;
 					}
@@ -691,8 +724,8 @@ void *rfcomm_thread(void *arg) {
 					rfcomm_set_hfp_state(&conn, HFP_CONNECTED);
 					/* fall-through */
 				case HFP_CONNECTED:
-					bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &t->device->addr,
-							BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
+					bluealsa_dbus_transport_update(t->rfcomm.sco,
+							BA_DBUS_TRANSPORT_UPDATE_SAMPLING | BA_DBUS_TRANSPORT_UPDATE_CODEC);
 				}
 
 			if (conn.handler != NULL) {
@@ -708,6 +741,7 @@ void *rfcomm_thread(void *arg) {
 
 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 
+		pfds[2].fd = t->rfcomm.handler_fd;
 		switch (poll(pfds, ARRAYSIZE(pfds), timeout)) {
 		case 0:
 			debug("RFCOMM poll timeout");
@@ -731,7 +765,6 @@ void *rfcomm_thread(void *arg) {
 			switch (sig) {
 			case TRANSPORT_SET_VOLUME:
 				if (conn.mic_gain != t->rfcomm.sco->sco.mic_gain) {
-					char tmp[16];
 					int gain = conn.mic_gain = t->rfcomm.sco->sco.mic_gain;
 					debug("Setting microphone gain: %d", gain);
 					sprintf(tmp, "+VGM=%d", gain);
@@ -739,7 +772,6 @@ void *rfcomm_thread(void *arg) {
 						goto ioerror;
 				}
 				if (conn.spk_gain != t->rfcomm.sco->sco.spk_gain) {
-					char tmp[16];
 					int gain = conn.spk_gain = t->rfcomm.sco->sco.spk_gain;
 					debug("Setting speaker gain: %d", gain);
 					sprintf(tmp, "+VGS=%d", gain);
@@ -747,14 +779,6 @@ void *rfcomm_thread(void *arg) {
 						goto ioerror;
 				}
 				break;
-			case TRANSPORT_SEND_RFCOMM: {
-				char cmd[32];
-				if (read(pfds[0].fd, cmd, sizeof(cmd)) != sizeof(cmd))
-					warn("Couldn't read RFCOMM command: %s", strerror(errno));
-				if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RAW, cmd, NULL) == -1)
-					goto ioerror;
-				break;
-			}
 			default:
 				break;
 			}
@@ -776,19 +800,27 @@ read:
 				}
 
 			/* use predefined callback, otherwise get generic one */
+			bool predefined_callback = false;
 			if (conn.handler != NULL && conn.handler->type == reader.at.type &&
 					strcmp(conn.handler->command, reader.at.command) == 0) {
 				callback = conn.handler->callback;
+				predefined_callback = true;
 				conn.handler = NULL;
 			}
 			else
 				callback = rfcomm_get_callback(&reader.at);
 
+			if (pfds[2].fd != -1 && !predefined_callback) {
+				at_build(tmp, reader.at.type, reader.at.command, reader.at.value);
+				if (write(pfds[2].fd, tmp, strlen(tmp)) == -1)
+					warn("Couldn't forward AT: %s", strerror(errno));
+			}
+
 			if (callback != NULL) {
 				if (callback(&conn, &reader.at) == -1)
 					goto ioerror;
 			}
-			else {
+			else if (pfds[2].fd == -1) {
 				warn("Unsupported AT message: %s: command:%s, value:%s",
 						at_type2str(reader.at.type), reader.at.command, reader.at.value);
 				if (reader.at.type != AT_TYPE_RESP)
@@ -802,6 +834,34 @@ read:
 			goto ioerror;
 		}
 
+		if (pfds[2].revents & POLLIN) {
+			/* read data from the external handler */
+
+			ssize_t ret;
+			while ((ret = read(pfds[2].fd, tmp, sizeof(tmp) - 1)) == -1 &&
+					errno == EINTR)
+				continue;
+
+			if (ret <= 0)
+				goto ioerror_exthandler;
+
+			tmp[ret] = '\0';
+			if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RAW, tmp, NULL) == -1)
+				goto ioerror;
+
+		}
+		else if (pfds[2].revents & (POLLERR | POLLHUP)) {
+			errno = ECONNRESET;
+			goto ioerror_exthandler;
+		}
+
+		continue;
+
+ioerror_exthandler:
+		if (errno != 0)
+			error("AT handler IO error: %s", strerror(errno));
+		close(t->rfcomm.handler_fd);
+		t->rfcomm.handler_fd = -1;
 		continue;
 
 ioerror:

@@ -3,16 +3,18 @@
 
 TESTS = \
 	test-at \
-	test-ctl \
+	test-ba \
 	test-io \
+	test-msbc \
 	test-pcm \
 	test-utils
 
 check_PROGRAMS = \
 	server-mock \
 	test-at \
-	test-ctl \
+	test-ba \
 	test-io \
+	test-msbc \
 	test-pcm \
 	test-utils
 

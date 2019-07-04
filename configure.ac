@@ -2,7 +2,7 @@
 # Copyright (c) 2016-2019 Arkadiusz Bokowy
 
 AC_PREREQ([2.60])
-AC_INIT([bluez-alsa], [1.3.1], [arkadiusz.bokowy@gmail.com])
+AC_INIT([bluez-alsa], [1.4.0], [arkadiusz.bokowy@gmail.com])
 AM_INIT_AUTOMAKE([foreign subdir-objects -Wall -Werror])
 
 AC_CONFIG_HEADERS([config.h])
@@ -17,7 +17,6 @@ LT_INIT
 
 # configuration should match ALSA library
 AC_PREFIX_DEFAULT([/usr])
-AC_SUBST([runstatedir], [/var/run])
 
 # testing presence of pkg-config
 AC_MSG_CHECKING([pkg-config m4 macros])
@@ -41,7 +40,6 @@ AM_CONDITIONAL([ENABLE_DEBUG_TIME], [test "x$enable_debug_time" = "xyes"])
 AM_COND_IF([ENABLE_DEBUG_TIME], [
 	AC_DEFINE([DEBUG_TIME], [1], [Define to 1 if the debug timing is enabled.])
 ])
-AC_CHECK_FUNCS([register_printf_specifier])
 
 AC_CHECK_LIB([pthread], [pthread_create],
 	[], [AC_MSG_ERROR([pthread library not found])])
@@ -54,7 +52,8 @@ AC_CHECK_FUNCS([splice],
 
 PKG_CHECK_MODULES([ALSA], [alsa])
 PKG_CHECK_MODULES([BLUEZ], [bluez >= 5.0])
-PKG_CHECK_MODULES([GLIB2], [glib-2.0 >= 2.26])
+PKG_CHECK_MODULES([DBUS1], [dbus-1 >= 1.6])
+PKG_CHECK_MODULES([GLIB2], [glib-2.0 >= 2.30])
 PKG_CHECK_MODULES([GIO2], [gio-unix-2.0])
 PKG_CHECK_MODULES([SBC], [sbc >= 1.2])
 
@@ -81,9 +80,16 @@ AC_ARG_ENABLE([ldac],
 	[AS_HELP_STRING([--enable-ldac], [enable LDAC support])])
 AM_CONDITIONAL([ENABLE_LDAC], [test "x$enable_ldac" = "xyes"])
 AM_COND_IF([ENABLE_LDAC], [
-	PKG_CHECK_MODULES([LDAC], [libldacBT >= 2.0.0])
-	PKG_CHECK_MODULES([LDAC_ABR], [libldacBT_abr >= 2.0.0])
+	PKG_CHECK_MODULES([LDAC], [ldacBT-enc >= 2.0.0])
+	PKG_CHECK_MODULES([LDAC_ABR], [ldacBT-abr >= 2.0.0])
 	AC_DEFINE([ENABLE_LDAC], [1], [Define to 1 if LDAC is enabled.])
+])
+
+AC_ARG_ENABLE([msbc],
+	[AS_HELP_STRING([--enable-msbc], [enable mSBC support])])
+AM_CONDITIONAL([ENABLE_MSBC], [test "x$enable_msbc" = "xyes"])
+AM_COND_IF([ENABLE_MSBC], [
+	AC_DEFINE([ENABLE_MSBC], [1], [Define to 1 if mSBC is enabled.])
 ])
 
 AC_ARG_ENABLE([ofono],
@@ -123,11 +129,16 @@ AM_COND_IF([ENABLE_TEST], [
 	PKG_CHECK_MODULES([CHECK], [check >= 0.9.10])
 ])
 
+AC_ARG_WITH([dbusconfdir],
+	AC_HELP_STRING([--with-dbusconfdir=dir], [path to D-Bus system bus configuration files]),
+	[dbusconfdir="${withval}"],
+	[dbusconfdir=$($PKG_CONFIG --variable=sysconfdir dbus-1)/dbus-1/system.d])
 AC_ARG_WITH([alsaplugindir],
 	AS_HELP_STRING([--with-alsaplugindir=dir], [path where ALSA plugin files are stored]),
-	[alsaplugindir="$withval"], [alsaplugindir="$libdir/alsa-lib"])
+	[alsaplugindir="$withval"],
+	[alsaplugindir=$($PKG_CONFIG --variable=libdir alsa)/alsa-lib])
 AC_ARG_WITH([alsaconfdir],
-	AS_HELP_STRING([--with-alsaconfdir=dir], [directory containing ALSA add-on configuration files]),
+	AS_HELP_STRING([--with-alsaconfdir=dir], [path to ALSA add-on configuration files]),
 	[alsaconfdir="$withval"],
 	[AM_COND_IF([ALSA_1_1_7],
 		[alsaconfdir="$sysconfdir/alsa/conf.d"],
@@ -145,11 +156,10 @@ eval alsaplugindir="$alsaplugindir"
 
 AC_DEFINE_UNQUOTED([ALSA_CONF_DIR], "$alsaconfdir", [Directory containing ALSA add-on configuration files.])
 AC_DEFINE_UNQUOTED([ALSA_PLUGIN_DIR], "$alsaplugindir", [Directory containing ALSA add-on modules.])
-AC_DEFINE_UNQUOTED([RUN_STATE_DIR], "$runstatedir", [Path where run statuses are stored.])
 
+AC_SUBST([DBUS_CONF_DIR], [$dbusconfdir])
 AC_SUBST([ALSA_CONF_DIR], [$alsaconfdir])
 AC_SUBST([ALSA_PLUGIN_DIR], [$alsaplugindir])
-AC_SUBST([RUN_STATE_DIR], [$runstatedir])
 
 AC_CONFIG_FILES([
 	Makefile
@@ -168,4 +178,12 @@ AM_COND_IF([ALSA_1_1_2], [
 	AC_MSG_WARN([random deadlocks (bluez-alsa PCM plugin is affected).])
 	AC_MSG_WARN([Either compile alsa-lib without this feature or export])
 	AC_MSG_WARN([LIBASOUND_THREAD_SAFE=0 while using bluealsa PCM.])
+])
+
+# warn user that aptX support is not an open-source feature
+AM_COND_IF([ENABLE_APTX], [
+	AC_MSG_WARN([             *** aptX encoder support ***])
+	AC_MSG_WARN([You have enabled support for aptX encoding. Note, that])
+	AC_MSG_WARN([by default bluez-alsa will use openaptx library, which])
+	AC_MSG_WARN([does NOT perform any encoding/decoding.])
 ])

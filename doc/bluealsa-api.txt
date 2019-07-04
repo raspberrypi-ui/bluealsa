@@ -1,0 +1,109 @@
+Manager hierarchy
+=================
+
+Service         org.bluealsa[.unique ID]
+Interface       org.bluealsa.Manager1
+Object path     [variable prefix]/
+
+Methods         array{object, dict} GetPCMs()
+
+                        Returns the array of available PCM objects and
+                        associated properties.
+
+Signals         void PCMAdded(object path, dict props)
+
+                        Signal emitted when new PCM is added. It contains
+                        the object path and associated properties.
+
+                void PCMRemoved(object path)
+
+                        Signal emitted when device has been removed. The
+                        object path is only for a reference - it has been
+                        already removed.
+
+PCM hierarchy
+=============
+
+Service         org.bluealsa[.unique ID]
+Interface       org.bluealsa.PCM1
+Object path     [variable prefix]/{hci0,hci1,...}/dev_XX_XX_XX_XX_XX_XX/a2dp
+                [variable prefix]/{hci0,hci1,...}/dev_XX_XX_XX_XX_XX_XX/sco
+
+Methods         fd, fd Open(string mode)
+
+                        Open PCM stream in a given operation mode. This method
+                        returns two file descriptors, respectively PCM stream
+                        PIPE and PCM controller SEQPACKET socket.
+
+                        Controller socket commands: "Drain", "Drop", "Pause",
+                                                    "Resume"
+
+                        Possible Errors: dbus.Error.InvalidArguments
+                                         dbus.Error.NotSupported
+                                         dbus.Error.Failed
+
+Properties      object Device [readonly]
+
+                        BlueZ device object path.
+
+                array{string} Modes [readonly]
+
+                        Available operation modes.
+
+                        Possible values: "sink" or "source"
+
+                byte Channels [readonly]
+
+                        Number of audio channels.
+
+                uint32 Sampling [readonly]
+
+                        Sampling frequency.
+
+                uint16 Codec [readonly]
+
+                        Bluetooth transport codec.
+
+                uint16 Delay [readonly]
+
+                        Approximate PCM delay in 1/10 of millisecond.
+
+                uint16 Volume [readwrite]
+
+                        This property holds PCM volume and mute information
+                        for channel 1 (left) and 2 (right) or playback and
+                        capture for SCO. Data for channel 1 and playback is
+                        stored in the upper byte, while channel 2 and capture
+                        is stored in the lower byte. The highest bit of both
+                        bytes determines whether channel is muted.
+
+                        Possible A2DP values: 0-127
+                        Possible SCO values: 0-15
+
+RFCOMM hierarchy
+================
+
+Service         org.bluealsa[.unique ID]
+Interface       org.bluealsa.RFCOMM1
+Object path     [variable prefix]/{hci0,hci1,...}/dev_XX_XX_XX_XX_XX_XX/rfcomm
+
+Methods         fd Open()
+
+                        Open RFCOMM socket for dispatching AT commands not
+                        handled internally by BlueALSA. This method returns
+                        a SEQPACKET socket.
+
+                        Possible Errors: dbus.Error.NotSupported
+                                         dbus.Error.Failed
+
+Properties      string Mode [readonly]
+
+                        HFP/HSP connection mode.
+
+                        Possible values: "HFP-AG", "HFP-HF", "HSP-AG" or
+                                         "HSP-HS"
+
+                uint32 Features [readonly]
+
+                        HFP feature bitmask. Note, that this value depends on
+                        the connection mode.

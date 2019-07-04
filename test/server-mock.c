@@ -22,17 +22,22 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "inc/dbus.inc"
 #include "inc/sine.inc"
 
 #include "../src/bluealsa.c"
+#include "../src/bluealsa-dbus.c"
+#include "../src/bluealsa-iface.c"
 #include "../src/at.c"
-#include "../src/ctl.c"
+#include "../src/ba-adapter.c"
+#include "../src/ba-device.c"
+#include "../src/ba-transport.c"
 #include "../src/io.h"
 #define io_thread_a2dp_sink_sbc _io_thread_a2dp_sink_sbc
 #include "../src/io.c"
 #undef io_thread_a2dp_sink_sbc
+#include "../src/msbc.c"
 #include "../src/rfcomm.c"
-#include "../src/transport.c"
 #include "../src/utils.c"
 #include "../src/shared/ffb.c"
 #include "../src/shared/log.c"
@@ -48,22 +53,20 @@ static const a2dp_sbc_t cconfig = {
 	.max_bitpool = SBC_MAX_BITPOOL,
 };
 
-static const char *device = "hci-mock";
+static GMainLoop *loop = NULL;
+static struct ba_adapter *a = NULL;
+static const char *service = "org.bluealsa";
 static unsigned int timeout = 5;
 static bool fuzzing = false;
 static bool source = false;
 static bool sink = false;
 static bool sco = false;
 
-static void test_pcm_setup_free(void) {
-	bluealsa_ctl_free();
-}
-
 static bool main_loop_on = true;
 static void test_pcm_setup_free_handler(int sig) {
 	(void)(sig);
 	main_loop_on = false;
-	test_pcm_setup_free();
+	g_main_loop_quit(loop);
 }
 
 static int sigusr1_count = 0;
@@ -106,22 +109,21 @@ int test_transport_release(struct ba_transport *t) {
 }
 
 struct ba_transport *test_transport_new_a2dp(struct ba_device *d,
-		const char *owner, const char *path, enum bluetooth_profile profile,
-		uint16_t codec, const uint8_t *config, size_t csize) {
+		struct ba_transport_type type, const char *owner, const char *path,
+		const void *cconfig, size_t csize) {
 	if (fuzzing)
 		sleep(1);
-	struct ba_transport *t = transport_new_a2dp(d, owner, path, profile, codec, config, csize);
+	struct ba_transport *t = ba_transport_new_a2dp(d, type, owner, path, cconfig, csize);
 	t->acquire = test_transport_acquire;
 	t->release = test_transport_release;
 	return t;
 }
 
 struct ba_transport *test_transport_new_sco(struct ba_device *d,
-		const char *owner, const char *path, enum bluetooth_profile profile,
-		uint16_t codec) {
+		struct ba_transport_type type, const char *owner, const char *path) {
 	if (fuzzing)
 		sleep(1);
-	struct ba_transport *t = transport_new_sco(d, owner, path, profile, codec);
+	struct ba_transport *t = ba_transport_new_sco(d, type, owner, path, NULL);
 	t->acquire = test_transport_acquire;
 	t->release = test_transport_release;
 	return t;
@@ -129,7 +131,7 @@ struct ba_transport *test_transport_new_sco(struct ba_device *d,
 
 void *io_thread_a2dp_sink_sbc(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
-	pthread_cleanup_push(PTHREAD_CLEANUP(transport_pthread_cleanup), t);
+	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup), t);
 
 	struct asrsync asrs = { .frames = 0 };
 	int16_t buffer[1024 * 2];
@@ -145,7 +147,7 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 		fprintf(stderr, ".");
 
 		if (asrs.frames == 0)
-			asrsync_init(&asrs, transport_get_sampling(t));
+			asrsync_init(&asrs, ba_transport_get_sampling(t));
 
 		int samples = sizeof(buffer) / sizeof(int16_t);
 		x = snd_pcm_sine_s16le(buffer, samples, 2, x, 0.01);
@@ -160,13 +162,91 @@ void *io_thread_a2dp_sink_sbc(void *arg) {
 	return NULL;
 }
 
+void *test_bt_mock(void *data) {
+	(void)data;
+
+	bdaddr_t addr;
+	struct ba_device *d1, *d2;
+	struct ba_transport *t1d1 = NULL, *t2d1 = NULL, *t3d1 = NULL;
+	struct ba_transport *t1d2 = NULL, *t2d2 = NULL, *t3d2 = NULL;
+
+	str2ba("12:34:56:78:9A:BC", &addr);
+	assert((d1 = ba_device_new(a, &addr)) != NULL);
+
+	str2ba("12:34:56:9A:BC:DE", &addr);
+	assert((d2 = ba_device_new(a, &addr)) != NULL);
+
+	if (source) {
+		struct ba_transport_type ttype = {
+			.profile = BA_TRANSPORT_PROFILE_A2DP_SOURCE,
+			.codec = A2DP_CODEC_SBC };
+		assert((t1d1 = test_transport_new_a2dp(d1, ttype, ":test", "/source/1",
+					&cconfig, sizeof(cconfig))) != NULL);
+		assert((t1d2 = test_transport_new_a2dp(d2, ttype, ":test", "/source/2",
+					&cconfig, sizeof(cconfig))) != NULL);
+	}
+
+	if (sink) {
+		struct ba_transport_type ttype = {
+			.profile = BA_TRANSPORT_PROFILE_A2DP_SINK,
+			.codec = A2DP_CODEC_SBC };
+		assert((t2d1 = test_transport_new_a2dp(d1, ttype, ":test", "/sink/1",
+						&cconfig, sizeof(cconfig))) != NULL);
+		assert(t2d1->acquire(t2d1) == 0);
+		assert((t2d2 = test_transport_new_a2dp(d2, ttype, ":test", "/sink/2",
+						&cconfig, sizeof(cconfig))) != NULL);
+		assert(t2d2->acquire(t2d2) == 0);
+	}
+
+	if (sco) {
+		struct ba_transport_type ttype = { .profile = BA_TRANSPORT_PROFILE_HSP_AG };
+		assert((t3d1 = test_transport_new_sco(d1, ttype, ":test", "/sco/1")) != NULL);
+		ttype.profile = BA_TRANSPORT_PROFILE_HFP_AG;
+		assert((t3d2 = test_transport_new_sco(d2, ttype, ":test", "/sco/2")) != NULL);
+		if (fuzzing) {
+			t3d2->type.codec = HFP_CODEC_CVSD;
+			bluealsa_dbus_transport_update(t3d2,
+					BA_DBUS_TRANSPORT_UPDATE_SAMPLING | BA_DBUS_TRANSPORT_UPDATE_CODEC);
+		}
+	}
+
+	ba_device_unref(d1);
+	ba_device_unref(d2);
+
+	while (timeout != 0 && main_loop_on)
+		timeout = sleep(timeout);
+
+	if (t1d1 != NULL)
+		ba_transport_destroy(t1d1);
+	if (t2d1 != NULL)
+		ba_transport_destroy(t2d1);
+	if (t3d1 != NULL)
+		ba_transport_destroy(t3d1);
+
+	if (fuzzing)
+		sleep(1);
+
+	if (t1d2 != NULL)
+		ba_transport_destroy(t1d2);
+	if (t2d2 != NULL)
+		ba_transport_destroy(t2d2);
+	if (t3d2 != NULL)
+		ba_transport_destroy(t3d2);
+
+	if (fuzzing)
+		sleep(1);
+
+	g_main_loop_quit(loop);
+	return NULL;
+}
+
 int main(int argc, char *argv[]) {
 
 	int opt;
-	const char *opts = "hsit:F";
+	const char *opts = "hb:t:F";
 	struct option longopts[] = {
 		{ "help", no_argument, NULL, 'h' },
-		{ "device", required_argument, NULL, 'i' },
+		{ "dbus", required_argument, NULL, 'b' },
 		{ "timeout", required_argument, NULL, 't' },
 		{ "fuzzing", no_argument, NULL, 'F' },
 		{ "source", no_argument, NULL, 1 },
@@ -178,7 +258,7 @@ int main(int argc, char *argv[]) {
 	while ((opt = getopt_long(argc, argv, opts, longopts, NULL)) != -1)
 		switch (opt) {
 		case 'h':
-			printf("usage: %s [--source] [--sink] [--sco] [--device HCI] [--timeout SEC]\n", argv[0]);
+			printf("usage: %s [--source] [--sink] [--sco] [--timeout SEC]\n", argv[0]);
 			return EXIT_SUCCESS;
 		case 1:
 			source = true;
@@ -189,8 +269,8 @@ int main(int argc, char *argv[]) {
 		case 3:
 			sco = true;
 			break;
-		case 'i':
-			device = optarg;
+		case 'b':
+			service = optarg;
 			break;
 		case 't':
 			timeout = atoi(optarg);
@@ -203,17 +283,19 @@ int main(int argc, char *argv[]) {
 			return EXIT_FAILURE;
 		}
 
-	/* emulate dummy test HCI device */
-	strncpy(config.hci_dev.name, device, sizeof(config.hci_dev.name) - 1);
-
 	assert(bluealsa_config_init() == 0);
-	assert(bluealsa_ctl_thread_init() == 0);
+	assert((config.dbus = g_test_dbus_connection_new_sync(NULL)) != NULL);
 
-	/* make sure to cleanup named pipes */
+	assert(bluealsa_dbus_manager_register(NULL) != 0);
+	assert(g_bus_own_name_on_connection(config.dbus, service,
+				G_BUS_NAME_OWNER_FLAGS_NONE, NULL, NULL, NULL, NULL) != 0);
+
+	/* emulate dummy test HCI device */
+	assert((a = ba_adapter_new(0)) != NULL);
+
 	struct sigaction sigact = { .sa_handler = test_pcm_setup_free_handler };
 	sigaction(SIGINT, &sigact, NULL);
 	sigaction(SIGTERM, &sigact, NULL);
-	atexit(test_pcm_setup_free);
 
 	/* receive EPIPE error code */
 	sigact.sa_handler = SIG_IGN;
@@ -224,59 +306,12 @@ int main(int argc, char *argv[]) {
 	sigaction(SIGUSR1, &sigact, NULL);
 	sigaction(SIGUSR2, &sigact, NULL);
 
-	bdaddr_t addr;
-	struct ba_device *d1, *d2;
+	/* run mock thread */
+	g_thread_new(NULL, test_bt_mock, NULL);
 
-	/* Connect two devices with the same name, but different MAC addresses.
-	 * This test will ensure, that it is possible to launch mixer plug-in. */
+	loop = g_main_loop_new(NULL, FALSE);
+	g_main_loop_run(loop);
 
-	str2ba("12:34:56:78:9A:BC", &addr);
-	assert((d1 = device_new(1, &addr, "Test Device With Long Name")) != NULL);
-	bluealsa_device_insert("/device/1", d1);
-
-	str2ba("12:34:56:9A:BC:DE", &addr);
-	assert((d2 = device_new(1, &addr, "Test Device With Long Name")) != NULL);
-	bluealsa_device_insert("/device/2", d2);
-
-	if (source) {
-		assert(test_transport_new_a2dp(d1, ":test", "/source/1", BLUETOOTH_PROFILE_A2DP_SOURCE,
-					A2DP_CODEC_SBC, (uint8_t *)&cconfig, sizeof(cconfig)) != NULL);
-		assert(test_transport_new_a2dp(d2, ":test", "/source/2", BLUETOOTH_PROFILE_A2DP_SOURCE,
-					A2DP_CODEC_SBC, (uint8_t *)&cconfig, sizeof(cconfig)) != NULL);
-	}
-
-	if (sink) {
-		struct ba_transport *t;
-		assert((t = test_transport_new_a2dp(d1, ":test", "/sink/1", BLUETOOTH_PROFILE_A2DP_SINK,
-						A2DP_CODEC_SBC, (uint8_t *)&cconfig, sizeof(cconfig))) != NULL);
-		assert(t->acquire(t) == 0);
-		assert((t = test_transport_new_a2dp(d2, ":test", "/sink/2", BLUETOOTH_PROFILE_A2DP_SINK,
-						A2DP_CODEC_SBC, (uint8_t *)&cconfig, sizeof(cconfig))) != NULL);
-		assert(t->acquire(t) == 0);
-	}
-
-	if (sco) {
-		struct ba_transport *t;
-		assert((t = test_transport_new_sco(d1, ":test", "/sco/1", BLUETOOTH_PROFILE_HSP_AG,
-						HFP_CODEC_UNDEFINED)) != NULL);
-		assert((t = test_transport_new_sco(d2, ":test", "/sco/2", BLUETOOTH_PROFILE_HFP_AG,
-						HFP_CODEC_UNDEFINED)) != NULL);
-		if (fuzzing) {
-			t->codec = HFP_CODEC_CVSD;
-			bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_CHANGED, &t->device->addr,
-					BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
-		}
-	}
-
-	while (timeout != 0 && main_loop_on)
-		timeout = sleep(timeout);
-
-	if (fuzzing) {
-		bluealsa_device_remove("/device/1");
-		sleep(1);
-		bluealsa_device_remove("/device/2");
-		sleep(1);
-	}
-
+	ba_adapter_unref(a);
 	return EXIT_SUCCESS;
 }

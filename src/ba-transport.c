@@ -1,5 +1,5 @@
 /*
- * BlueALSA - transport.c
+ * BlueALSA - ba-transport.c
  * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
@@ -8,181 +8,34 @@
  *
  */
 
-#include "transport.h"
+#include "ba-transport.h"
 
 #include <errno.h>
-#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <sys/types.h>
+#include <unistd.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 #include <bluetooth/hci_lib.h>
 
+#include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <glib-object.h>
+#include <glib.h>
 
 #include "a2dp-codecs.h"
+#include "ba-adapter.h"
 #include "bluealsa.h"
+#include "bluealsa-dbus.h"
 #include "bluez-iface.h"
-#include "ctl.h"
 #include "hfp.h"
 #include "io.h"
-#include "rfcomm.h"
 #include "utils.h"
 #include "shared/log.h"
-
-
-static const char *transport_type_to_string(enum ba_transport_type type) {
-	switch (type) {
-	case TRANSPORT_TYPE_A2DP:
-		return "A2DP";
-	case TRANSPORT_TYPE_RFCOMM:
-		return "RFCOMM";
-	case TRANSPORT_TYPE_SCO:
-		return "SCO";
-	}
-	return "N/A";
-}
-
-static int io_thread_create(struct ba_transport *t) {
-
-	void *(*routine)(void *) = NULL;
-	int ret;
-
-	switch (t->type) {
-	case TRANSPORT_TYPE_A2DP:
-		if (t->profile == BLUETOOTH_PROFILE_A2DP_SOURCE)
-			switch (t->codec) {
-			case A2DP_CODEC_SBC:
-				routine = io_thread_a2dp_source_sbc;
-				break;
-#if ENABLE_MPEG
-			case A2DP_CODEC_MPEG12:
-				break;
-#endif
-#if ENABLE_AAC
-			case A2DP_CODEC_MPEG24:
-				routine = io_thread_a2dp_source_aac;
-				break;
-#endif
-#if ENABLE_APTX
-			case A2DP_CODEC_VENDOR_APTX:
-				routine = io_thread_a2dp_source_aptx;
-				break;
-#endif
-#if ENABLE_LDAC
-			case A2DP_CODEC_VENDOR_LDAC:
-				routine = io_thread_a2dp_source_ldac;
-				break;
-#endif
-			default:
-				warn("Codec not supported: %u", t->codec);
-			}
-		if (t->profile == BLUETOOTH_PROFILE_A2DP_SINK)
-			switch (t->codec) {
-			case A2DP_CODEC_SBC:
-				routine = io_thread_a2dp_sink_sbc;
-				break;
-#if ENABLE_MPEG
-			case A2DP_CODEC_MPEG12:
-				break;
-#endif
-#if ENABLE_AAC
-			case A2DP_CODEC_MPEG24:
-				routine = io_thread_a2dp_sink_aac;
-				break;
-#endif
-			default:
-				warn("Codec not supported: %u", t->codec);
-			}
-		break;
-	case TRANSPORT_TYPE_RFCOMM:
-		routine = rfcomm_thread;
-		break;
-	case TRANSPORT_TYPE_SCO:
-		routine = io_thread_sco;
-		break;
-	}
-
-	if (routine == NULL)
-		return -1;
-
-	if ((ret = pthread_create(&t->thread, NULL, routine, t)) != 0) {
-		error("Couldn't create IO thread: %s", strerror(ret));
-		t->thread = config.main_thread;
-		return -1;
-	}
-
-	pthread_setname_np(t->thread, "baio");
-	debug("Created new IO thread: %s: %s",
-			transport_type_to_string(t->type),
-			bluetooth_profile_to_string(t->profile));
-	return 0;
-}
-
-struct ba_device *device_new(int hci_dev_id, const bdaddr_t *addr, const char *name) {
-
-	struct ba_device *d;
-
-	if ((d = calloc(1, sizeof(*d))) == NULL)
-		return NULL;
-
-	d->hci_dev_id = hci_dev_id;
-	bacpy(&d->addr, addr);
-
-	strncpy(d->name, name, sizeof(d->name));
-	d->name[sizeof(d->name) - 1] = '\0';
-
-	d->transports = g_hash_table_new_full(g_str_hash, g_str_equal,
-			NULL, (GDestroyNotify)transport_free);
-
-	return d;
-}
-
-void device_free(struct ba_device *d) {
-
-	if (d == NULL)
-		return;
-
-	/* XXX: Modification-safe remove-all loop.
-	 *
-	 * By the usage of a standard g_hash_table_remove_all() function, one
-	 * has to comply to the license warranty, which states that anything
-	 * can happen. In our case it is true to the letter - SIGSEGV is 100%
-	 * guaranteed.
-	 *
-	 * Our transport structure holds reference to some other transport
-	 * structure within the same hash-table. Unfortunately, such a usage
-	 * is not supported. Almost every GLib-2.0 function facilitates cache,
-	 * which backfires at us if we modify hash-table from the inside of
-	 * the destroy function. However, it is possible to "iterate" over
-	 * a hash-table in a pop-like matter - reinitialize iterator after
-	 * every modification. And voila - modification-safe remove loop. */
-	for (;;) {
-
-		GHashTableIter iter;
-		struct ba_transport *t;
-
-		g_hash_table_iter_init(&iter, d->transports);
-		if (!g_hash_table_iter_next(&iter, NULL, (gpointer)&t))
-			break;
-
-		transport_free(t);
-	}
-
-	g_hash_table_unref(d->transports);
-	free(d);
-}
-
-void device_set_battery_level(struct ba_device *d, uint8_t value) {
-	d->battery.enabled = true;
-	d->battery.level = value;
-	bluealsa_ctl_send_event(BA_EVENT_BATTERY, &d->addr, 0);
-}
 
 /**
  * Create new transport.
@@ -192,29 +45,24 @@ void device_set_battery_level(struct ba_device *d, uint8_t value) {
  * @param dbus_owner D-Bus service, which owns this transport.
  * @param dbus_path D-Bus service path for this transport.
  * @param profile Bluetooth profile.
- * @param codec Used audio codec.
  * @return On success, the pointer to the newly allocated transport structure
  *   is returned. If error occurs, NULL is returned and the errno variable is
  *   set to indicated the cause of the error. */
-struct ba_transport *transport_new(
+struct ba_transport *ba_transport_new(
 		struct ba_device *device,
-		enum ba_transport_type type,
+		struct ba_transport_type type,
 		const char *dbus_owner,
-		const char *dbus_path,
-		enum bluetooth_profile profile,
-		uint16_t codec) {
+		const char *dbus_path) {
 
 	struct ba_transport *t;
 	int err;
 
 	if ((t = calloc(1, sizeof(*t))) == NULL)
-		goto fail;
+		return NULL;
 
-	t->device = device;
+	t->d = ba_device_ref(device);
 	t->type = type;
-
-	t->profile = profile;
-	t->codec = codec;
+	t->ref_count = 1;
 
 	pthread_mutex_init(&t->mutex, NULL);
 
@@ -225,26 +73,29 @@ struct ba_transport *transport_new(
 	t->sig_fd[0] = -1;
 	t->sig_fd[1] = -1;
 
-	if ((t->dbus_owner = strdup(dbus_owner)) == NULL)
+	if ((t->bluez_dbus_owner = strdup(dbus_owner)) == NULL)
 		goto fail;
-	if ((t->dbus_path = strdup(dbus_path)) == NULL)
+	if ((t->bluez_dbus_path = strdup(dbus_path)) == NULL)
 		goto fail;
 
 	if (pipe(t->sig_fd) == -1)
 		goto fail;
 
-	g_hash_table_insert(device->transports, t->dbus_path, t);
+	pthread_mutex_lock(&device->transports_mutex);
+	g_hash_table_insert(device->transports, t->bluez_dbus_path, t);
+	pthread_mutex_unlock(&device->transports_mutex);
+
 	return t;
 
 fail:
 	err = errno;
-	transport_free(t);
+	ba_transport_unref(t);
 	errno = err;
 	return NULL;
 }
 
 /* These acquire/release helper functions should be defined before the
- * corresponding transport_new_* ones. However, git commit history is
+ * corresponding ba_transport_new_* ones. However, git commit history is
  * more important, so we're going to keep these functions at original
  * locations and use forward declarations instead. */
 static int transport_acquire_bt_a2dp(struct ba_transport *t);
@@ -253,28 +104,25 @@ static int transport_release_bt_rfcomm(struct ba_transport *t);
 static int transport_acquire_bt_sco(struct ba_transport *t);
 static int transport_release_bt_sco(struct ba_transport *t);
 
-struct ba_transport *transport_new_a2dp(
+struct ba_transport *ba_transport_new_a2dp(
 		struct ba_device *device,
+		struct ba_transport_type type,
 		const char *dbus_owner,
 		const char *dbus_path,
-		enum bluetooth_profile profile,
-		uint16_t codec,
-		const uint8_t *config,
-		size_t config_size) {
+		const void *cconfig,
+		size_t cconfig_size) {
 
 	struct ba_transport *t;
 
-	if ((t = transport_new(device, TRANSPORT_TYPE_A2DP,
-					dbus_owner, dbus_path, profile, codec)) == NULL)
+	if ((t = ba_transport_new(device, type, dbus_owner, dbus_path)) == NULL)
 		return NULL;
 
 	t->a2dp.ch1_volume = 127;
 	t->a2dp.ch2_volume = 127;
 
-	if (config_size > 0) {
-		t->a2dp.cconfig = malloc(config_size);
-		t->a2dp.cconfig_size = config_size;
-		memcpy(t->a2dp.cconfig, config, config_size);
+	if (cconfig_size > 0) {
+		t->a2dp.cconfig = g_memdup(cconfig, cconfig_size);
+		t->a2dp.cconfig_size = cconfig_size;
 	}
 
 	t->a2dp.pcm.fd = -1;
@@ -285,62 +133,64 @@ struct ba_transport *transport_new_a2dp(
 	t->acquire = transport_acquire_bt_a2dp;
 	t->release = transport_release_bt_a2dp;
 
-	bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_ADDED, &device->addr,
-			BA_PCM_TYPE_A2DP | (profile == BLUETOOTH_PROFILE_A2DP_SOURCE ?
-				BA_PCM_STREAM_PLAYBACK : BA_PCM_STREAM_CAPTURE));
+	t->ba_dbus_path = g_strdup_printf("%s/a2dp", device->ba_dbus_path);
+	bluealsa_dbus_transport_register(t, NULL);
 
 	return t;
 }
 
-struct ba_transport *transport_new_rfcomm(
+struct ba_transport *ba_transport_new_rfcomm(
 		struct ba_device *device,
+		struct ba_transport_type type,
 		const char *dbus_owner,
-		const char *dbus_path,
-		enum bluetooth_profile profile) {
+		const char *dbus_path) {
 
-	gchar *dbus_path_sco = NULL;
 	struct ba_transport *t, *t_sco;
+	char dbus_path_sco[64];
+	int err;
 
-	if ((t = transport_new(device, TRANSPORT_TYPE_RFCOMM,
-					dbus_owner, dbus_path, profile, -1)) == NULL)
-		goto fail;
+	struct ba_transport_type ttype = {
+		.profile = type.profile | BA_TRANSPORT_PROFILE_RFCOMM };
+	if ((t = ba_transport_new(device, ttype, dbus_owner, dbus_path)) == NULL)
+		return NULL;
 
-	dbus_path_sco = g_strdup_printf("%s/sco", dbus_path);
-	if ((t_sco = transport_new_sco(device, dbus_owner, dbus_path_sco,
-					profile, HFP_CODEC_UNDEFINED)) == NULL)
+	t->ba_dbus_path = g_strdup_printf("%s/rfcomm", device->ba_dbus_path);
+	t->rfcomm.handler_fd = -1;
+
+	snprintf(dbus_path_sco, sizeof(dbus_path_sco), "%s/sco", dbus_path);
+	if ((t_sco = ba_transport_new_sco(device, type, dbus_owner, dbus_path_sco, t)) == NULL)
 		goto fail;
 
 	t->rfcomm.sco = t_sco;
-	t_sco->sco.rfcomm = t;
-
 	t->release = transport_release_bt_rfcomm;
 
 	return t;
 
 fail:
-	if (dbus_path_sco != NULL)
-		g_free(dbus_path_sco);
-	transport_free(t);
+	err = errno;
+	ba_transport_unref(t);
+	errno = err;
 	return NULL;
 }
 
-struct ba_transport *transport_new_sco(
+struct ba_transport *ba_transport_new_sco(
 		struct ba_device *device,
+		struct ba_transport_type type,
 		const char *dbus_owner,
 		const char *dbus_path,
-		enum bluetooth_profile profile,
-		uint16_t codec) {
+		struct ba_transport *rfcomm) {
 
 	struct ba_transport *t;
 
 	/* HSP supports CVSD only */
-	if (profile == BLUETOOTH_PROFILE_HSP_HS ||
-			profile == BLUETOOTH_PROFILE_HSP_AG)
-		codec = HFP_CODEC_CVSD;
+	if (type.profile & BA_TRANSPORT_PROFILE_MASK_HSP)
+		type.codec = HFP_CODEC_CVSD;
 
-	if ((t = transport_new(device, TRANSPORT_TYPE_SCO,
-					dbus_owner, dbus_path, profile, codec)) == NULL)
+	if ((t = ba_transport_new(device, type, dbus_owner, dbus_path)) == NULL)
 		return NULL;
+
+	if (rfcomm != NULL)
+		t->sco.rfcomm = ba_transport_ref(rfcomm);
 
 	t->sco.spk_gain = 15;
 	t->sco.mic_gain = 15;
@@ -357,32 +207,71 @@ struct ba_transport *transport_new_sco(
 	t->acquire = transport_acquire_bt_sco;
 	t->release = transport_release_bt_sco;
 
-	bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_ADDED, &device->addr,
-			BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE);
+	t->ba_dbus_path = g_strdup_printf("%s/sco", device->ba_dbus_path);
+	bluealsa_dbus_transport_register(t, NULL);
 
 	return t;
 }
 
-void transport_free(struct ba_transport *t) {
+struct ba_transport *ba_transport_lookup(
+		struct ba_device *device,
+		const char *dbus_path) {
 
-	if (t == NULL || t->state == TRANSPORT_LIMBO)
-		return;
+	struct ba_transport *t;
 
-	t->state = TRANSPORT_LIMBO;
-	debug("Freeing transport: %s: %s (%s)",
-			transport_type_to_string(t->type),
-			bluetooth_profile_to_string(t->profile),
-			bluetooth_a2dp_codec_to_string(t->codec));
+	pthread_mutex_lock(&device->transports_mutex);
+	if ((t = g_hash_table_lookup(device->transports, dbus_path)) != NULL)
+		t->ref_count++;
+	pthread_mutex_unlock(&device->transports_mutex);
+
+	return t;
+}
+
+struct ba_transport *ba_transport_ref(
+		struct ba_transport *t) {
+
+	struct ba_device *d = t->d;
+
+	pthread_mutex_lock(&d->transports_mutex);
+	t->ref_count++;
+	pthread_mutex_unlock(&d->transports_mutex);
+
+	return t;
+}
+
+void ba_transport_destroy(struct ba_transport *t) {
 
 	/* If the transport is active, prior to releasing resources, we have to
 	 * terminate the IO thread (or at least make sure it is not running any
 	 * more). Not doing so might result in an undefined behavior or even a
 	 * race condition (closed and reused file descriptor). */
-	transport_pthread_cancel(t->thread);
+	ba_transport_pthread_cancel(t->thread);
+
+	/* remove D-Bus interface */
+	bluealsa_dbus_transport_unregister(t);
 
 	/* if possible, try to release resources gracefully */
 	if (t->release != NULL)
 		t->release(t);
+
+	ba_transport_unref(t);
+}
+
+void ba_transport_unref(struct ba_transport *t) {
+
+	int ref_count;
+	struct ba_device *d = t->d;
+
+	pthread_mutex_lock(&d->transports_mutex);
+	if ((ref_count = --t->ref_count) == 0)
+		/* detach transport from the device */
+		g_hash_table_steal(d->transports, t->bluez_dbus_path);
+	pthread_mutex_unlock(&d->transports_mutex);
+
+	if (ref_count > 0)
+		return;
+
+	debug("Freeing transport: %s", ba_transport_type_to_string(t->type));
 
 	if (t->bt_fd != -1)
 		close(t->bt_fd);
@@ -391,117 +280,46 @@ void transport_free(struct ba_transport *t) {
 	if (t->sig_fd[1] != -1)
 		close(t->sig_fd[1]);
 
-	pthread_mutex_destroy(&t->mutex);
+	ba_device_unref(d);
 
-	unsigned int pcm_type = BA_PCM_TYPE_NULL;
-
-	/* free type-specific resources */
-	switch (t->type) {
-	case TRANSPORT_TYPE_A2DP:
-		pcm_type = BA_PCM_TYPE_A2DP | (t->profile == BLUETOOTH_PROFILE_A2DP_SOURCE ?
-				BA_PCM_STREAM_PLAYBACK : BA_PCM_STREAM_CAPTURE);
-		transport_release_pcm(&t->a2dp.pcm);
+	if (t->type.profile & BA_TRANSPORT_PROFILE_RFCOMM) {
+		if (t->rfcomm.sco != NULL)
+			ba_transport_unref(t->rfcomm.sco);
+		if (t->rfcomm.handler_fd != -1)
+			close(t->rfcomm.handler_fd);
+		d->battery_level = -1;
+	}
+	else if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_SCO) {
+		pthread_mutex_destroy(&t->sco.spk_drained_mtx);
+		pthread_cond_destroy(&t->sco.spk_drained);
+		ba_transport_release_pcm(&t->sco.spk_pcm);
+		ba_transport_release_pcm(&t->sco.mic_pcm);
+		if (t->sco.rfcomm != NULL)
+			ba_transport_unref(t->sco.rfcomm);
+	}
+	else if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP) {
+		ba_transport_release_pcm(&t->a2dp.pcm);
 		pthread_mutex_destroy(&t->a2dp.drained_mtx);
 		pthread_cond_destroy(&t->a2dp.drained);
 		free(t->a2dp.cconfig);
-		break;
-	case TRANSPORT_TYPE_RFCOMM:
-		memset(&t->device->battery, 0, sizeof(t->device->battery));
-		memset(&t->device->xapl, 0, sizeof(t->device->xapl));
-		transport_free(t->rfcomm.sco);
-		break;
-	case TRANSPORT_TYPE_SCO:
-		pcm_type = BA_PCM_TYPE_SCO | BA_PCM_STREAM_PLAYBACK | BA_PCM_STREAM_CAPTURE;
-		pthread_mutex_destroy(&t->sco.spk_drained_mtx);
-		pthread_cond_destroy(&t->sco.spk_drained);
-		transport_release_pcm(&t->sco.spk_pcm);
-		transport_release_pcm(&t->sco.mic_pcm);
-		if (t->sco.rfcomm != NULL)
-			t->sco.rfcomm->rfcomm.sco = NULL;
-		break;
 	}
 
-	/* If the free action was called on the behalf of the destroy notification,
-	 * removing a value from the hash-table shouldn't hurt - it would have been
-	 * removed anyway. */
-	g_hash_table_steal(t->device->transports, t->dbus_path);
-
-	if (pcm_type != BA_PCM_TYPE_NULL)
-		bluealsa_ctl_send_event(BA_EVENT_TRANSPORT_REMOVED, &t->device->addr, pcm_type);
-
-	free(t->dbus_owner);
-	free(t->dbus_path);
+	pthread_mutex_destroy(&t->mutex);
+	if (t->ba_dbus_path != NULL)
+		g_free(t->ba_dbus_path);
+	free(t->bluez_dbus_owner);
+	free(t->bluez_dbus_path);
 	free(t);
 }
 
-struct ba_transport *transport_lookup(GHashTable *devices, const char *dbus_path) {
-
-#if DEBUG
-	/* make sure that the device mutex is acquired */
-	g_assert(pthread_mutex_trylock(&config.devices_mutex) == EBUSY);
-#endif
-
-	GHashTableIter iter;
-	struct ba_device *d;
-	struct ba_transport *t;
-
-	g_hash_table_iter_init(&iter, devices);
-	while (g_hash_table_iter_next(&iter, NULL, (gpointer)&d)) {
-		if ((t = g_hash_table_lookup(d->transports, dbus_path)) != NULL)
-			return t;
-	}
-
-	return NULL;
-}
-
-bool transport_remove(GHashTable *devices, const char *dbus_path) {
-
-#if DEBUG
-	/* make sure that the device mutex is acquired */
-	g_assert(pthread_mutex_trylock(&config.devices_mutex) == EBUSY);
-#endif
-
-	GHashTableIter iter;
-	struct ba_device *d;
-	struct ba_transport *t;
-
-	g_hash_table_iter_init(&iter, devices);
-	while (g_hash_table_iter_next(&iter, NULL, (gpointer)&d)) {
-		/* Disassociate D-Bus owner before further actions. This will ensure,
-		 * that we will not generate errors by using non-existent interface. */
-		if ((t = g_hash_table_lookup(d->transports, dbus_path)) != NULL) {
-			free(t->dbus_owner);
-			t->dbus_owner = NULL;
-		}
-		if (g_hash_table_remove(d->transports, dbus_path)) {
-			if (g_hash_table_size(d->transports) == 0)
-				g_hash_table_iter_remove(&iter);
-			return true;
-		}
-	}
-
-	return false;
-}
-
-int transport_send_signal(struct ba_transport *t, enum ba_transport_signal sig) {
+int ba_transport_send_signal(struct ba_transport *t, enum ba_transport_signal sig) {
 	return write(t->sig_fd[1], &sig, sizeof(sig));
 }
 
-int transport_send_rfcomm(struct ba_transport *t, const char command[32]) {
+unsigned int ba_transport_get_channels(const struct ba_transport *t) {
 
-	char msg[sizeof(enum ba_transport_signal) + 32];
-
-	((enum ba_transport_signal *)msg)[0] = TRANSPORT_SEND_RFCOMM;
-	memcpy(&msg[sizeof(enum ba_transport_signal)], command, 32);
-
-	return write(t->sig_fd[1], msg, sizeof(msg));
-}
-
-unsigned int transport_get_channels(const struct ba_transport *t) {
-
-	switch (t->type) {
-	case TRANSPORT_TYPE_A2DP:
-		switch (t->codec) {
+	if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP)
+		switch (t->type.codec) {
 		case A2DP_CODEC_SBC:
 			switch (((a2dp_sbc_t *)t->a2dp.cconfig)->channel_mode) {
 			case SBC_CHANNEL_MODE_MONO:
@@ -556,22 +374,18 @@ unsigned int transport_get_channels(const struct ba_transport *t) {
 			break;
 #endif
 		}
-		break;
-	case TRANSPORT_TYPE_RFCOMM:
-		break;
-	case TRANSPORT_TYPE_SCO:
+
+	if (IS_BA_TRANSPORT_PROFILE_SCO(t->type.profile))
 		return 1;
-	}
 
 	/* the number of channels is unspecified */
 	return 0;
 }
 
-unsigned int transport_get_sampling(const struct ba_transport *t) {
+unsigned int ba_transport_get_sampling(const struct ba_transport *t) {
 
-	switch (t->type) {
-	case TRANSPORT_TYPE_A2DP:
-		switch (t->codec) {
+	if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP)
+		switch (t->type.codec) {
 		case A2DP_CODEC_SBC:
 			switch (((a2dp_sbc_t *)t->a2dp.cconfig)->frequency) {
 			case SBC_SAMPLING_FREQ_16000:
@@ -665,11 +479,9 @@ unsigned int transport_get_sampling(const struct ba_transport *t) {
 			break;
 #endif
 		}
-		break;
-	case TRANSPORT_TYPE_RFCOMM:
-		break;
-	case TRANSPORT_TYPE_SCO:
-		switch (t->codec) {
+
+	if (IS_BA_TRANSPORT_PROFILE_SCO(t->type.profile))
+		switch (t->type.codec) {
 		case HFP_CODEC_UNDEFINED:
 			break;
 		case HFP_CODEC_CVSD:
@@ -677,15 +489,89 @@ unsigned int transport_get_sampling(const struct ba_transport *t) {
 		case HFP_CODEC_MSBC:
 			return 16000;
 		default:
-			debug("Unsupported SCO codec: %#x", t->codec);
+			debug("Unsupported SCO codec: %#x", t->type.codec);
 		}
-	}
 
 	/* the sampling frequency is unspecified */
 	return 0;
 }
 
-int transport_set_state(struct ba_transport *t, enum ba_transport_state state) {
+uint16_t ba_transport_get_delay(const struct ba_transport *t) {
+	if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP)
+		return t->delay + t->a2dp.delay;
+	if (IS_BA_TRANSPORT_PROFILE_SCO(t->type.profile))
+		return t->delay + 10;
+	return t->delay;
+}
+
+/**
+ * Get transport volume encoded as a single 16-bit value. */
+uint16_t ba_transport_get_volume_packed(const struct ba_transport *t) {
+	if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP)
+		return ((t->a2dp.ch1_muted << 7) | t->a2dp.ch1_volume) << 8 |
+			((t->a2dp.ch2_muted << 7) | t->a2dp.ch2_volume);
+	if (IS_BA_TRANSPORT_PROFILE_SCO(t->type.profile))
+		return ((t->sco.spk_muted << 7) | t->sco.spk_gain) << 8 |
+			((t->sco.mic_muted << 7) | t->sco.mic_gain);
+	return 0;
+}
+
+/**
+ * Set transport volume from an encoded single 16-bit value. */
+int ba_transport_set_volume_packed(struct ba_transport *t, uint16_t value) {
+
+	uint8_t ch1 = value >> 8;
+	uint8_t ch2 = value & 0xFF;
+
+	debug("Setting volume: %d<>%d [%c%c]", ch1 & 0x7F, ch2 & 0x7F,
+			ch1 & 0x80 ? 'M' : 'O', ch2 & 0x80 ? 'M' : 'O');
+
+	if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP) {
+
+		t->a2dp.ch1_muted = !!(ch1 & 0x80);
+		t->a2dp.ch2_muted = !!(ch2 & 0x80);
+		t->a2dp.ch1_volume = ch1 & 0x7F;
+		t->a2dp.ch2_volume = ch2 & 0x7F;
+
+		if (config.a2dp.volume) {
+
+			uint16_t volume = 0;
+			GError *err = NULL;
+
+			if (!t->a2dp.ch1_muted && !t->a2dp.ch2_muted)
+				volume = (t->a2dp.ch1_volume + t->a2dp.ch2_volume) / 2;
+			g_dbus_set_property(config.dbus, t->bluez_dbus_owner, t->bluez_dbus_path,
+					BLUEZ_IFACE_MEDIA_TRANSPORT, "Volume", g_variant_new_uint16(volume), &err);
+
+			if (err != NULL) {
+				warn("Couldn't set BT device volume: %s", err->message);
+				g_error_free(err);
+			}
+
+		}
+
+	}
+
+	if (IS_BA_TRANSPORT_PROFILE_SCO(t->type.profile)) {
+
+		t->sco.spk_muted = !!(ch1 & 0x80);
+		t->sco.mic_muted = !!(ch2 & 0x80);
+		t->sco.spk_gain = ch1 & 0x7F;
+		t->sco.mic_gain = ch2 & 0x7F;
+
+		if (t->sco.rfcomm != NULL)
+			/* notify associated RFCOMM transport */
+			ba_transport_send_signal(t->sco.rfcomm, TRANSPORT_SET_VOLUME);
+
+	}
+
+	/* notify connected clients (including requester) */
+	bluealsa_dbus_transport_update(t, BA_DBUS_TRANSPORT_UPDATE_VOLUME);
+
+	return 0;
+}
+
+int ba_transport_set_state(struct ba_transport *t, enum ba_transport_state state) {
 	debug("State transition: %d -> %d", t->state, state);
 
 	if (t->state == state)
@@ -693,7 +579,7 @@ int transport_set_state(struct ba_transport *t, enum ba_transport_state state) {
 
 	/* For the A2DP sink profile, the IO thread can not be created until the
 	 * BT transport is acquired, otherwise thread initialized will fail. */
-	if (t->profile == BLUETOOTH_PROFILE_A2DP_SINK &&
+	if (t->type.profile == BA_TRANSPORT_PROFILE_A2DP_SINK &&
 			t->state == TRANSPORT_IDLE && state != TRANSPORT_PENDING)
 		return 0;
 
@@ -703,13 +589,13 @@ int transport_set_state(struct ba_transport *t, enum ba_transport_state state) {
 
 	switch (state) {
 	case TRANSPORT_IDLE:
-		transport_pthread_cancel(t->thread);
+		ba_transport_pthread_cancel(t->thread);
 		break;
 	case TRANSPORT_PENDING:
 		/* When transport is marked as pending, try to acquire transport, but only
 		 * if we are handing A2DP sink profile. For source profile, transport has
 		 * to be acquired by our controller (during the PCM open request). */
-		if (t->profile == BLUETOOTH_PROFILE_A2DP_SINK)
+		if (t->type.profile == BA_TRANSPORT_PROFILE_A2DP_SINK)
 			ret = t->acquire(t);
 		break;
 	case TRANSPORT_ACTIVE:
@@ -717,37 +603,29 @@ int transport_set_state(struct ba_transport *t, enum ba_transport_state state) {
 		if (pthread_equal(t->thread, config.main_thread))
 			ret = io_thread_create(t);
 		break;
-	case TRANSPORT_LIMBO:
-		break;
 	}
 
 	/* something went wrong, so go back to idle */
 	if (ret == -1)
-		return transport_set_state(t, TRANSPORT_IDLE);
+		return ba_transport_set_state(t, TRANSPORT_IDLE);
 
 	return ret;
 }
 
-int transport_drain_pcm(struct ba_transport *t) {
+int ba_transport_drain_pcm(struct ba_transport *t) {
 
 	pthread_mutex_t *mutex = NULL;
 	pthread_cond_t *drained = NULL;
 
-	switch (t->profile) {
-	case BLUETOOTH_PROFILE_NULL:
-	case BLUETOOTH_PROFILE_A2DP_SINK:
-		break;
-	case BLUETOOTH_PROFILE_A2DP_SOURCE:
+	switch (t->type.profile) {
+	case BA_TRANSPORT_PROFILE_A2DP_SOURCE:
 		mutex = &t->a2dp.drained_mtx;
 		drained = &t->a2dp.drained;
 		break;
-	case BLUETOOTH_PROFILE_HSP_AG:
-	case BLUETOOTH_PROFILE_HFP_AG:
+	case BA_TRANSPORT_PROFILE_HFP_AG:
+	case BA_TRANSPORT_PROFILE_HSP_AG:
 		mutex = &t->sco.spk_drained_mtx;
 		drained = &t->sco.spk_drained;
-		break;
-	case BLUETOOTH_PROFILE_HSP_HS:
-	case BLUETOOTH_PROFILE_HFP_HF:
 		break;
 	}
 
@@ -756,7 +634,7 @@ int transport_drain_pcm(struct ba_transport *t) {
 
 	pthread_mutex_lock(mutex);
 
-	transport_send_signal(t, TRANSPORT_PCM_SYNC);
+	ba_transport_send_signal(t, TRANSPORT_PCM_SYNC);
 	pthread_cond_wait(drained, mutex);
 
 	pthread_mutex_unlock(mutex);
@@ -787,8 +665,8 @@ static int transport_acquire_bt_a2dp(struct ba_transport *t) {
 		goto final;
 	}
 
-	msg = g_dbus_message_new_method_call(t->dbus_owner, t->dbus_path, BLUEZ_IFACE_MEDIA_TRANSPORT,
-			t->state == TRANSPORT_PENDING ? "TryAcquire" : "Acquire");
+	msg = g_dbus_message_new_method_call(t->bluez_dbus_owner, t->bluez_dbus_path,
+			BLUEZ_IFACE_MEDIA_TRANSPORT, t->state == TRANSPORT_PENDING ? "TryAcquire" : "Acquire");
 
 	if ((rep = g_dbus_connection_send_message_with_reply_sync(config.dbus, msg,
 					G_DBUS_SEND_MESSAGE_FLAGS_NONE, -1, NULL, NULL, &err)) == NULL)
@@ -842,16 +720,14 @@ static int transport_release_bt_a2dp(struct ba_transport *t) {
 	if (t->bt_fd == -1)
 		return 0;
 
-	debug("Releasing transport: %s (%s)",
-			bluetooth_profile_to_string(t->profile),
-			bluetooth_a2dp_codec_to_string(t->codec));
+	debug("Releasing transport: %s", ba_transport_type_to_string(t->type));
 
 	/* If the state is idle, it means that either transport was not acquired, or
 	 * was released by the BlueZ. In both cases there is no point in a explicit
 	 * release request. It might even return error (e.g. not authorized). */
-	if (t->state != TRANSPORT_IDLE && t->dbus_owner != NULL) {
+	if (t->state != TRANSPORT_IDLE && t->bluez_dbus_owner != NULL) {
 
-		msg = g_dbus_message_new_method_call(t->dbus_owner, t->dbus_path,
+		msg = g_dbus_message_new_method_call(t->bluez_dbus_owner, t->bluez_dbus_path,
 				BLUEZ_IFACE_MEDIA_TRANSPORT, "Release");
 
 		if ((rep = g_dbus_connection_send_message_with_reply_sync(config.dbus, msg,
@@ -904,8 +780,13 @@ static int transport_release_bt_rfcomm(struct ba_transport *t) {
 
 	/* BlueZ does not trigger profile disconnection signal when the Bluetooth
 	 * link has been lost (e.g. device power down). However, it is required to
-	 * remove transport from the transport pool before reconnecting. */
-	transport_free(t);
+	 * remove all references, otherwise resources will not be freed. */
+	bluealsa_dbus_transport_unregister(t);
+
+	if (t->rfcomm.sco != NULL) {
+		ba_transport_destroy(t->rfcomm.sco);
+		t->rfcomm.sco = NULL;
+	}
 
 	return 0;
 }
@@ -917,12 +798,12 @@ static int transport_acquire_bt_sco(struct ba_transport *t) {
 	if (t->bt_fd != -1)
 		return t->bt_fd;
 
-	if (hci_devinfo(t->device->hci_dev_id, &di) == -1) {
+	if (hci_devinfo(t->d->a->hci_dev_id, &di) == -1) {
 		error("Couldn't get HCI device info: %s", strerror(errno));
 		return -1;
 	}
 
-	if ((t->bt_fd = hci_open_sco(&di, &t->device->addr, t->codec != HFP_CODEC_CVSD)) == -1) {
+	if ((t->bt_fd = hci_open_sco(di.dev_id, &t->d->addr, t->type.codec != HFP_CODEC_CVSD)) == -1) {
 		error("Couldn't open SCO link: %s", strerror(errno));
 		return -1;
 	}
@@ -934,6 +815,9 @@ static int transport_acquire_bt_sco(struct ba_transport *t) {
 	 *      are incorrect (or our interpretation of them is incorrect). */
 	t->mtu_read = 48;
 	t->mtu_write = 48;
+
+	if (t->type.codec == HFP_CODEC_MSBC)
+		t->mtu_read = t->mtu_write = 24;
 
 	debug("New SCO link: %d (MTU: R:%zu W:%zu)", t->bt_fd, t->mtu_read, t->mtu_write);
 
@@ -954,7 +838,7 @@ static int transport_release_bt_sco(struct ba_transport *t) {
 	return 0;
 }
 
-int transport_release_pcm(struct ba_pcm *pcm) {
+int ba_transport_release_pcm(struct ba_pcm *pcm) {
 
 	if (pcm->fd == -1)
 		return 0;
@@ -980,7 +864,7 @@ int transport_release_pcm(struct ba_pcm *pcm) {
 
 /**
  * Synchronous transport thread cancellation. */
-void transport_pthread_cancel(pthread_t thread) {
+void ba_transport_pthread_cancel(pthread_t thread) {
 
 	if (pthread_equal(thread, pthread_self()))
 		return;
@@ -997,9 +881,9 @@ void transport_pthread_cancel(pthread_t thread) {
 /**
  * Wrapper for release callback, which can be used by the pthread cleanup.
  *
- * This function CAN be used with transport_pthread_cleanup_lock() in order
+ * This function CAN be used with ba_transport_pthread_cleanup_lock() in order
  * to guard transport critical section during cleanup process. */
-void transport_pthread_cleanup(struct ba_transport *t) {
+void ba_transport_pthread_cleanup(struct ba_transport *t) {
 
 	/* During the normal operation mode, the release callback should not
 	 * be NULL. Hence, we will relay on this callback - file descriptors
@@ -1011,20 +895,23 @@ void transport_pthread_cleanup(struct ba_transport *t) {
 	 * be used anymore. */
 	t->thread = config.main_thread;
 
-	transport_pthread_cleanup_unlock(t);
+	ba_transport_pthread_cleanup_unlock(t);
 
 	/* XXX: If the order of the cleanup push is right, this function will
 	 *      indicate the end of the IO/RFCOMM thread. */
-	debug("Exiting IO thread");
+	debug("Exiting IO thread: %s", ba_transport_type_to_string(t->type));
+
+	/* Remove reference which was taken by the io_thread_create(). */
+	ba_transport_unref(t);
 }
 
-int transport_pthread_cleanup_lock(struct ba_transport *t) {
+int ba_transport_pthread_cleanup_lock(struct ba_transport *t) {
 	int ret = pthread_mutex_lock(&t->mutex);
 	t->cleanup_lock = true;
 	return ret;
 }
 
-int transport_pthread_cleanup_unlock(struct ba_transport *t) {
+int ba_transport_pthread_cleanup_unlock(struct ba_transport *t) {
 	if (!t->cleanup_lock)
 		return 0;
 	t->cleanup_lock = false;

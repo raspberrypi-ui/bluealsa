@@ -8,8 +8,8 @@
  *
  */
 
-#ifndef BLUEALSA_BLUEALSA_H
-#define BLUEALSA_BLUEALSA_H
+#ifndef BLUEALSA_BLUEALSA_H_
+#define BLUEALSA_BLUEALSA_H_
 
 #if HAVE_CONFIG_H
 # include <config.h>
@@ -17,22 +17,15 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include <bluetooth/bluetooth.h>
 #include <bluetooth/hci.h>
 
-#include <glib.h>
 #include <gio/gio.h>
-
-#include "bluez.h"
-#include "bluez-a2dp.h"
-#include "transport.h"
-#include "shared/ctl-proto.h"
+#include <glib.h>
 
 struct ba_config {
-
-	/* used HCI device */
-	struct hci_dev_info hci_dev;
 
 	/* set of enabled profiles */
 	struct {
@@ -48,37 +41,19 @@ struct ba_config {
 	/* established D-Bus connection */
 	GDBusConnection *dbus;
 
+	/* adapters indexed by the HCI device ID */
+	pthread_mutex_t adapters_mutex;
+	struct ba_adapter *adapters[HCI_MAX_DEV];
+
+	/* List of HCI names (or BT addresses) used for adapters filtering
+	 * during profile registration. Leave it empty to use any adapter. */
+	GArray *hci_filter;
+
 	/* used for main thread identification */
 	pthread_t main_thread;
 
-	/* collection of connected devices */
-	pthread_mutex_t devices_mutex;
-	GHashTable *devices;
-
-	/* registered D-Bus objects */
-	GHashTable *dbus_objects;
-
 	/* opened null device */
 	int null_fd;
-
-	/* audio group ID */
-	gid_t gid_audio;
-
-	struct {
-
-		pthread_t thread;
-		bool socket_created;
-		bool thread_created;
-
-		/* special file descriptors + connected clients */
-		GArray *pfds;
-		/* event subscriptions for connected clients */
-		GArray *subs;
-
-		/* PIPE for transferring events */
-		int evt[2];
-
-	} ctl;
 
 	struct {
 		/* set of features exposed via Service Discovery */
@@ -126,31 +101,9 @@ struct ba_config {
 
 };
 
-/* Structure describing registered D-Bus object. */
-struct ba_dbus_object {
-	/* D-Bus object registration ID */
-	unsigned int id;
-	enum bluetooth_profile profile;
-	uint16_t codec;
-	/* determine whether profile is used */
-	bool connected;
-};
-
 /* Global BlueALSA configuration. */
 extern struct ba_config config;
 
 int bluealsa_config_init(void);
-
-#define bluealsa_devpool_mutex_lock() \
-	pthread_mutex_lock(&config.devices_mutex)
-#define bluealsa_devpool_mutex_unlock() \
-	pthread_mutex_unlock(&config.devices_mutex)
-
-#define bluealsa_device_insert(key, device) \
-	g_hash_table_insert(config.devices, g_strdup(key), device)
-#define bluealsa_device_lookup(key) \
-	((struct ba_device *)g_hash_table_lookup(config.devices, key))
-#define bluealsa_device_remove(key) \
-	g_hash_table_remove(config.devices, key)
 
 #endif

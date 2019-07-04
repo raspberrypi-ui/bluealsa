@@ -11,17 +11,13 @@
 #include "bluealsa.h"
 
 #include <fcntl.h>
-#include <grp.h>
-#include <poll.h>
 
 #if ENABLE_LDAC
 # include <ldacBT.h>
 #endif
 
-#include "ctl.h"
+#include "bluez-a2dp.h"
 #include "hfp.h"
-#include "transport.h"
-
 
 /* Initialize global configuration variable. */
 struct ba_config config = {
@@ -31,33 +27,42 @@ struct ba_config config = {
 	.enable.hfp_ag = true,
 	.enable.hsp_ag = true,
 
+	.adapters_mutex = PTHREAD_MUTEX_INITIALIZER,
+
 	.null_fd = -1,
-
-	/* omit chown if audio group is not defined */
-	.gid_audio = -1,
-
-	/* initialization flags */
-	.ctl.socket_created = false,
-	.ctl.thread_created = false,
-
-	.ctl.evt = { -1, -1 },
 
 	.hfp.features_sdp_hf =
 		SDP_HFP_HF_FEAT_CLI |
-		SDP_HFP_HF_FEAT_VOLUME,
-	.hfp.features_sdp_ag = 0,
+		SDP_HFP_HF_FEAT_VOLUME |
+#if ENABLE_MSBC
+		SDP_HFP_HF_FEAT_WBAND |
+#endif
+		0,
+	.hfp.features_sdp_ag =
+#if ENABLE_MSBC
+		SDP_HFP_AG_FEAT_WBAND |
+#endif
+		0,
 	.hfp.features_rfcomm_hf =
 		HFP_HF_FEAT_CLI |
 		HFP_HF_FEAT_VOLUME |
 		HFP_HF_FEAT_ECS |
 		HFP_HF_FEAT_ECC |
-		HFP_HF_FEAT_CODEC,
+#if ENABLE_MSBC
+		HFP_HF_FEAT_CODEC |
+		HFP_HF_FEAT_ESOC |
+#endif
+		0,
 	.hfp.features_rfcomm_ag =
 		HFP_AG_FEAT_REJECT |
 		HFP_AG_FEAT_ECS |
 		HFP_AG_FEAT_ECC |
 		HFP_AG_FEAT_EERC |
-		HFP_AG_FEAT_CODEC,
+#if ENABLE_MSBC
+		HFP_AG_FEAT_CODEC |
+		HFP_AG_FEAT_ESOC |
+#endif
+		0,
 
 	.a2dp.volume = false,
 	.a2dp.force_mono = false,
@@ -82,29 +87,11 @@ struct ba_config config = {
 
 int bluealsa_config_init(void) {
 
-	struct group *grp;
+	config.hci_filter = g_array_sized_new(FALSE, FALSE, sizeof(const char *), 4);
 
 	config.main_thread = pthread_self();
 
-	pthread_mutex_init(&config.devices_mutex, NULL);
-	config.devices = g_hash_table_new_full(g_str_hash, g_str_equal,
-			g_free, (GDestroyNotify)device_free);
-
-	config.dbus_objects = g_hash_table_new_full(g_direct_hash, g_direct_equal,
-			NULL, g_free);
-
 	config.null_fd = open("/dev/null", O_WRONLY | O_NONBLOCK);
-
-	/* use proper ACL group for our audio device */
-	if ((grp = getgrnam("audio")) != NULL)
-		config.gid_audio = grp->gr_gid;
-
-	/* Create arrays for handling connected clients. Note, that it is not
-	 * necessary to clear pfds array, because we have to initialize pollfd
-	 * struct by ourself anyway. Also, make sure to reserve some space, so
-	 * for most cases reallocation will not be required. */
-	config.ctl.pfds = g_array_sized_new(FALSE, FALSE, sizeof(struct pollfd), __CTL_IDX_MAX + 16);
-	config.ctl.subs = g_array_sized_new(FALSE, TRUE, sizeof(enum ba_event), 16);
 
 	config.a2dp.codecs = bluez_a2dp_codecs;
 

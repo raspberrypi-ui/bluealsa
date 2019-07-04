@@ -12,34 +12,44 @@
 # include <config.h>
 #endif
 
-#include <errno.h>
 #include <getopt.h>
 #include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
 
-#include <bluetooth/bluetooth.h>
-#include <bluetooth/hci.h>
-#include <bluetooth/hci_lib.h>
-
-#include <glib.h>
 #include <gio/gio.h>
+#include <glib.h>
 
 #if ENABLE_LDAC
 # include <ldacBT.h>
 #endif
 
 #include "bluealsa.h"
+#include "bluealsa-dbus.h"
+#include "bluealsa-iface.h"
+#include "bluez-a2dp.h"
 #include "bluez.h"
-#include "ctl.h"
 #if ENABLE_OFONO
 # include "ofono.h"
 #endif
-#include "transport.h"
 #include "utils.h"
 #include "shared/defs.h"
 #include "shared/log.h"
 
+/* If glib does not support immediate return in case of bus
+ * name being owned by some other connection (glib < 2.54),
+ * fall back to a default behavior - enter waiting queue. */
+#ifndef G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE
+# define G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE \
+	G_BUS_NAME_OWNER_FLAGS_NONE
+#endif
+
+static GMainLoop *loop = NULL;
+static int retval = EXIT_SUCCESS;
 
 static char *get_a2dp_codecs(
 		const struct bluez_a2dp_codec **codecs,
@@ -58,7 +68,6 @@ static char *get_a2dp_codecs(
 	return g_strjoinv(", ", (char **)tmp);
 }
 
-static GMainLoop *loop = NULL;
 static void main_loop_stop(int sig) {
 	/* Call to this handler restores the default action, so on the
 	 * second call the program will be forcefully terminated. */
@@ -69,13 +78,22 @@ static void main_loop_stop(int sig) {
 	g_main_loop_quit(loop);
 }
 
+static void dbus_name_lost(GDBusConnection *conn, const char *name, void *userdata) {
+	(void)conn;
+	(void)userdata;
+	error("Couldn't acquire D-Bus name: %s", name);
+	g_main_loop_quit(loop);
+	retval = EXIT_FAILURE;
+}
+
 int main(int argc, char **argv) {
 
 	int opt;
-	const char *opts = "hVSi:p:";
+	const char *opts = "hVB:Si:p:";
 	const struct option longopts[] = {
 		{ "help", no_argument, NULL, 'h' },
 		{ "version", no_argument, NULL, 'V' },
+		{ "dbus", required_argument, NULL, 'B' },
 		{ "syslog", no_argument, NULL, 'S' },
 		{ "device", required_argument, NULL, 'i' },
 		{ "profile", required_argument, NULL, 'p' },
@@ -95,8 +113,7 @@ int main(int argc, char **argv) {
 	};
 
 	bool syslog = false;
-	struct hci_dev_info *hci_devs;
-	int hci_devs_num;
+	char dbus_service[32] = BLUEALSA_SERVICE;
 
 	/* Check if syslog forwarding has been enabled. This check has to be
 	 * done before anything else, so we can log early stage warnings and
@@ -104,10 +121,10 @@ int main(int argc, char **argv) {
 	opterr = 0;
 	while ((opt = getopt_long(argc, argv, opts, longopts, NULL)) != -1)
 		switch (opt) {
-		case 'S':
+		case 'S' /* --syslog */ :
 			syslog = true;
 			break;
-		case 'p':
+		case 'p' /* --profile=NAME */ :
 			/* reset defaults if user has specified profile option */
 			memset(&config.enable, 0, sizeof(config.enable));
 			break;
@@ -118,23 +135,6 @@ int main(int argc, char **argv) {
 	if (bluealsa_config_init() != 0) {
 		error("Couldn't initialize bluealsa config");
 		return EXIT_FAILURE;
-	}
-
-	if (hci_devlist(&hci_devs, &hci_devs_num)) {
-		error("Couldn't enumerate HCI devices: %s", strerror(errno));
-		return EXIT_FAILURE;
-	}
-
-	if (!hci_devs_num) {
-		error("No HCI device available");
-		return EXIT_FAILURE;
-	}
-
-	{ /* try to get default device (if possible get active one) */
-		int i;
-		for (i = 0; i < hci_devs_num; i++)
-			if (i == 0 || hci_test_bit(HCI_UP, &hci_devs[i].flags))
-				memcpy(&config.hci_dev, &hci_devs[i], sizeof(config.hci_dev));
 	}
 
 	/* parse options */
@@ -148,6 +148,7 @@ int main(int argc, char **argv) {
 					"\nOptions:\n"
 					"  -h, --help\t\tprint this help and exit\n"
 					"  -V, --version\t\tprint version and exit\n"
+					"  -B, --dbus=NAME\tD-Bus service name suffix\n"
 					"  -S, --syslog\t\tsend output to syslog\n"
 					"  -i, --device=hciX\tHCI device to use\n"
 					"  -p, --profile=NAME\tenable BT profile\n"
@@ -187,39 +188,16 @@ int main(int argc, char **argv) {
 			printf("%s\n", PACKAGE_VERSION);
 			return EXIT_SUCCESS;
 
+		case 'B' /* --dbus=NAME */ :
+			snprintf(dbus_service, sizeof(dbus_service), BLUEALSA_SERVICE ".%s", optarg);
+			break;
+
 		case 'S' /* --syslog */ :
 			break;
 
-		case 'i' /* --device=HCI */ : {
-
-			bdaddr_t addr;
-			int i = hci_devs_num;
-			int found = 0;
-
-			if (str2ba(optarg, &addr) == 0) {
-				while (i--)
-					if (bacmp(&addr, &hci_devs[i].bdaddr) == 0) {
-						memcpy(&config.hci_dev, &hci_devs[i], sizeof(config.hci_dev));
-						found = 1;
-						break;
-					}
-			}
-			else {
-				while (i--)
-					if (strcmp(optarg, hci_devs[i].name) == 0) {
-						memcpy(&config.hci_dev, &hci_devs[i], sizeof(config.hci_dev));
-						found = 1;
-						break;
-				}
-			}
-
-			if (found == 0) {
-				error("HCI device not found: %s", optarg);
-				return EXIT_FAILURE;
-			}
-
+		case 'i' /* --device=HCI */ :
+			g_array_append_val(config.hci_filter, optarg);
 			break;
-		}
 
 		case 'p' /* --profile=NAME */ : {
 
@@ -305,16 +283,10 @@ int main(int argc, char **argv) {
 	}
 #endif
 
-	/* device list is no longer required */
-	free(hci_devs);
-
 	/* initialize random number generator */
 	srandom(time(NULL));
 
-	if ((bluealsa_ctl_thread_init()) == -1)
-		return EXIT_FAILURE;
-
-	gchar *address;
+	char *address;
 	GError *err;
 
 	err = NULL;
@@ -327,9 +299,14 @@ int main(int argc, char **argv) {
 		return EXIT_FAILURE;
 	}
 
+	err = NULL;
+	if (bluealsa_dbus_manager_register(&err) == 0) {
+		error("Couldn't register D-Bus manager: %s", err->message);
+		return EXIT_FAILURE;
+	}
+
 	bluez_subscribe_signals();
-	bluez_register_a2dp();
-	bluez_register_hfp();
+	bluez_register();
 
 #if ENABLE_OFONO
 	ofono_subscribe_signals();
@@ -347,16 +324,16 @@ int main(int argc, char **argv) {
 	sigaction(SIGTERM, &sigact, NULL);
 	sigaction(SIGINT, &sigact, NULL);
 
+	/* register well-known service name */
+	debug("Acquiring D-Bus service name: %s", dbus_service);
+	g_bus_own_name_on_connection(config.dbus, dbus_service,
+			G_BUS_NAME_OWNER_FLAGS_DO_NOT_QUEUE, NULL, dbus_name_lost, NULL, NULL);
+
 	/* main dispatching loop */
 	debug("Starting main dispatching loop");
 	loop = g_main_loop_new(NULL, FALSE);
 	g_main_loop_run(loop);
 
 	debug("Exiting main loop");
-
-	/* From all of the cleanup routines, this one cannot be omitted. We have
-	 * to unlink named socket, otherwise service will not start any more. */
-	bluealsa_ctl_free();
-
-	return EXIT_SUCCESS;
+	return retval;
 }

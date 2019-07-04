@@ -16,35 +16,42 @@
 #endif
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #include <bluetooth/bluetooth.h>
-#include <bluetooth/hci.h>
-#include <gio/gio.h>
 
-#include "bluez.h"
+#include <gio/gio.h>
+#include <glib.h>
+
+#include "ba-transport.h"
 
 int a2dp_sbc_default_bitpool(int freq, int mode);
 
-int hci_devlist(struct hci_dev_info **di, int *num);
-int hci_open_sco(const struct hci_dev_info *di, const bdaddr_t *ba, bool transparent);
-
-const char *bluetooth_profile_to_string(enum bluetooth_profile profile);
-const char *bluetooth_a2dp_codec_to_string(uint16_t codec);
+int hci_open_sco(int dev_id, const bdaddr_t *ba, bool transparent);
 const char *batostr_(const bdaddr_t *ba);
 
-const char *g_dbus_get_profile_object_path(enum bluetooth_profile profile, uint16_t codec);
-enum bluetooth_profile g_dbus_object_path_to_profile(const char *path);
-int g_dbus_device_path_to_bdaddr(const char *path, bdaddr_t *addr);
+int g_dbus_bluez_object_path_to_hci_dev_id(const char *path);
+bdaddr_t *g_dbus_bluez_object_path_to_bdaddr(const char *path, bdaddr_t *addr);
+struct ba_transport_type g_dbus_bluez_object_path_to_transport_type(const char *path);
+const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type type);
 
-GVariant *g_dbus_get_property(GDBusConnection *conn, const char *name,
-		const char *path, const char *interface, const char *property);
-gboolean g_dbus_set_property(GDBusConnection *conn, const char *name,
+GVariantIter *g_dbus_get_managed_objects(GDBusConnection *conn,
+		const char *name, const char *path, GError **error);
+GVariant *g_dbus_get_property(GDBusConnection *conn, const char *service,
 		const char *path, const char *interface, const char *property,
-		const GVariant *value);
+		GError **error);
+bool g_dbus_set_property(GDBusConnection *conn, const char *service,
+		const char *path, const char *interface, const char *property,
+		const GVariant *value, GError **error);
+
+char *g_variant_sanitize_object_path(char *path);
 
 void snd_pcm_scale_s16le(int16_t *buffer, size_t size, int channels,
 		double ch1_scale, double ch2_scale);
+
+const char *bluetooth_a2dp_codec_to_string(uint16_t codec);
+const char *ba_transport_type_to_string(struct ba_transport_type type);
 
 #if ENABLE_AAC
 #include <fdk-aac/aacdecoder_lib.h>

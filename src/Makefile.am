@@ -1,24 +1,35 @@
 # BlueALSA - Makefile.am
-# Copyright (c) 2016-2018 Arkadiusz Bokowy
+# Copyright (c) 2016-2019 Arkadiusz Bokowy
 
 bin_PROGRAMS = bluealsa
 SUBDIRS = asound
+
+dbusconfdir = @DBUS_CONF_DIR@
+dist_dbusconf_DATA = bluealsa.conf
 
 bluealsa_SOURCES = \
 	shared/ffb.c \
 	shared/log.c \
 	shared/rt.c \
 	at.c \
+	ba-adapter.c \
+	ba-device.c \
+	ba-transport.c \
 	bluealsa.c \
+	bluealsa-dbus.c \
+	bluealsa-iface.c \
 	bluez.c \
 	bluez-a2dp.c \
 	bluez-iface.c \
-	ctl.c \
 	io.c \
 	rfcomm.c \
-	transport.c \
 	utils.c \
 	main.c
+
+if ENABLE_MSBC
+bluealsa_SOURCES += \
+	msbc.c
+endif
 
 if ENABLE_OFONO
 bluealsa_SOURCES += \

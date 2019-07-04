@@ -1,6 +1,6 @@
 /*
  * BlueALSA - rfcomm.h
- * Copyright (c) 2016-2018 Arkadiusz Bokowy
+ * Copyright (c) 2016-2019 Arkadiusz Bokowy
  *
  * This file is a part of bluez-alsa.
  *
@@ -11,9 +11,15 @@
 #ifndef BLUEALSA_RFCOMM_H_
 #define BLUEALSA_RFCOMM_H_
 
+#if HAVE_CONFIG_H
+# include "config.h"
+#endif
+
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "at.h"
 #include "hfp.h"
-#include "transport.h"
 
 /* Number of retries during the SLC stage. */
 #define RFCOMM_SLC_RETRIES 10
@@ -40,6 +46,11 @@ struct rfcomm_conn {
 	/* variables used for AG<->HF sync */
 	uint8_t spk_gain;
 	uint8_t mic_gain;
+
+#if ENABLE_MSBC
+	/* determine whether mSBC is available */
+	bool msbc;
+#endif
 
 	/* associated transport */
 	struct ba_transport *t;

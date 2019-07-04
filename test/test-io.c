@@ -16,15 +16,25 @@
 
 #include "inc/sine.inc"
 #include "../src/at.c"
+#include "../src/ba-adapter.c"
+#include "../src/ba-device.c"
+#include "../src/ba-transport.c"
 #include "../src/bluealsa.c"
-#include "../src/ctl.c"
 #include "../src/io.c"
+#include "../src/msbc.c"
 #include "../src/rfcomm.c"
-#include "../src/transport.c"
 #include "../src/utils.c"
 #include "../src/shared/ffb.c"
 #include "../src/shared/log.c"
 #include "../src/shared/rt.c"
+
+int bluealsa_dbus_transport_register(struct ba_transport *t, GError **error) {
+	debug("%s: %p", __func__, t); (void)error;
+	return 0; }
+void bluealsa_dbus_transport_update(struct ba_transport *t, unsigned int mask) {
+	debug("%s: %p %#x", __func__, t, mask); }
+void bluealsa_dbus_transport_unregister(struct ba_transport *t) {
+	debug("%s: %p", __func__, t); }
 
 static const a2dp_sbc_t config_sbc_44100_stereo = {
 	.frequency = SBC_SAMPLING_FREQ_44100,
@@ -58,6 +68,9 @@ static const a2dp_ldac_t config_ldac_44100_stereo = {
 	.channel_mode = LDAC_CHANNEL_MODE_STEREO,
 };
 
+static struct ba_adapter *adapter = NULL;
+static struct ba_device *device = NULL;
+
 /**
  * Helper function for timed thread join.
  *
@@ -81,7 +94,7 @@ static int pthread_timedjoin(pthread_t thread, void **retval, useconds_t usec) {
 static struct {
 	uint8_t data[1024];
 	size_t len;
-} test_a2dp_bt_data[10];
+} test_bt_data[10];
 
 static void test_a2dp_encoding(struct ba_transport *t, void *(*cb)(void *)) {
 
@@ -91,30 +104,33 @@ static void test_a2dp_encoding(struct ba_transport *t, void *(*cb)(void *)) {
 	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, bt_fds), 0);
 	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, pcm_fds), 0);
 
-	t->profile = BLUETOOTH_PROFILE_A2DP_SOURCE;
+	t->type.profile = BA_TRANSPORT_PROFILE_A2DP_SOURCE;
 	t->state = TRANSPORT_ACTIVE;
-	t->bt_fd = bt_fds[0];
+	t->bt_fd = bt_fds[1];
 	t->a2dp.pcm.fd = pcm_fds[1];
 
 	pthread_t thread;
-	pthread_create(&thread, NULL, cb, t);
+	pthread_create(&thread, NULL, cb, ba_transport_ref(t));
 
-	struct pollfd pfds[] = {{ bt_fds[1], POLLIN, 0 }};
+	struct pollfd pfds[] = {{ bt_fds[0], POLLIN, 0 }};
 	int16_t buffer[1024 * 10];
 	size_t i = 0;
 
-	snd_pcm_sine_s16le(buffer, sizeof(buffer) / sizeof(int16_t), 2, 0, 0.01);
+	snd_pcm_sine_s16le(buffer, ARRAYSIZE(buffer), 2, 0, 0.01);
 	ck_assert_int_eq(write(pcm_fds[0], buffer, sizeof(buffer)), sizeof(buffer));
 
-	memset(test_a2dp_bt_data, 0, sizeof(test_a2dp_bt_data));
+	memset(test_bt_data, 0, sizeof(test_bt_data));
 	while (poll(pfds, ARRAYSIZE(pfds), 500) > 0) {
 
-		char label[32];
-		ssize_t len = read(bt_fds[1], buffer, t->mtu_write);
+		char label[35];
+		ssize_t len;
 
-		if (i < ARRAYSIZE(test_a2dp_bt_data)) {
-			memcpy(test_a2dp_bt_data[i].data, buffer, len);
-			test_a2dp_bt_data[i++].len = len;
+		if ((len = read(bt_fds[0], buffer, t->mtu_write)) <= 0)
+			break;
+
+		if (i < ARRAYSIZE(test_bt_data)) {
+			memcpy(test_bt_data[i].data, buffer, len);
+			test_bt_data[i++].len = len;
 		}
 
 		sprintf(label, "BT data [len: %3zd]", len);
@@ -126,7 +142,7 @@ static void test_a2dp_encoding(struct ba_transport *t, void *(*cb)(void *)) {
 	ck_assert_int_eq(pthread_timedjoin(thread, NULL, 1e6), 0);
 
 	close(pcm_fds[0]);
-	close(bt_fds[1]);
+	close(bt_fds[0]);
 }
 
 static void test_a2dp_decoding(struct ba_transport *t, void *(*cb)(void *)) {
@@ -137,61 +153,133 @@ static void test_a2dp_decoding(struct ba_transport *t, void *(*cb)(void *)) {
 	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, bt_fds), 0);
 	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, pcm_fds), 0);
 
-	t->profile = BLUETOOTH_PROFILE_A2DP_SINK;
+	t->type.profile = BA_TRANSPORT_PROFILE_A2DP_SINK;
 	t->state = TRANSPORT_ACTIVE;
 	t->bt_fd = bt_fds[1];
-	t->a2dp.pcm.fd = pcm_fds[0];
+	t->a2dp.pcm.fd = pcm_fds[1];
 
 	pthread_t thread;
-	pthread_create(&thread, NULL, cb, t);
+	pthread_create(&thread, NULL, cb, ba_transport_ref(t));
 
 	size_t i;
-	for (i = 0; i < ARRAYSIZE(test_a2dp_bt_data); i++)
-		if (test_a2dp_bt_data[i].len != 0)
-			ck_assert_int_gt(write(bt_fds[0], test_a2dp_bt_data[i].data, test_a2dp_bt_data[i].len), 0);
+	for (i = 0; i < ARRAYSIZE(test_bt_data); i++)
+		if (test_bt_data[i].len != 0)
+			ck_assert_int_gt(write(bt_fds[0], test_bt_data[i].data, test_bt_data[i].len), 0);
 
 	sleep(1);
 	ck_assert_int_eq(pthread_cancel(thread), 0);
 	ck_assert_int_eq(pthread_timedjoin(thread, NULL, 1e6), 0);
 
-	close(pcm_fds[1]);
+	close(pcm_fds[0]);
 	close(bt_fds[0]);
+}
+
+static void test_sco(struct ba_transport *t, void *(*cb)(void *)) {
+
+	int sco_fds[2];
+	int pcm_mic_fds[2];
+	int pcm_spk_fds[2];
+
+	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sco_fds), 0);
+	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, pcm_mic_fds), 0);
+	ck_assert_int_eq(socketpair(AF_UNIX, SOCK_STREAM, 0, pcm_spk_fds), 0);
+
+	t->state = TRANSPORT_ACTIVE;
+	t->bt_fd = sco_fds[1];
+	t->sco.mic_pcm.fd = pcm_mic_fds[1];
+	t->sco.spk_pcm.fd = pcm_spk_fds[1];
+
+	pthread_t thread;
+	pthread_create(&thread, NULL, cb, ba_transport_ref(t));
+
+	struct pollfd pfds[] = {
+		{ sco_fds[0], POLLIN, 0 },
+		{ pcm_mic_fds[0], POLLIN, 0 }};
+	int16_t buffer[1024 * 4];
+	size_t i = 0;
+
+	snd_pcm_sine_s16le(buffer, ARRAYSIZE(buffer), 2, 0, 0.01);
+	ck_assert_int_eq(write(pcm_spk_fds[0], buffer, sizeof(buffer)), sizeof(buffer));
+
+	memset(test_bt_data, 0, sizeof(test_bt_data));
+	while (poll(pfds, ARRAYSIZE(pfds), 500) > 0) {
+
+		if (pfds[0].revents & POLLIN) {
+
+			char label[35];
+			ssize_t len;
+
+			if ((len = read(sco_fds[0], buffer, t->mtu_write)) <= 0)
+				break;
+
+			sprintf(label, "BT data [len: %3zd]", len);
+			hexdump(label, buffer, len);
+
+			if (i < ARRAYSIZE(test_bt_data)) {
+				memcpy(test_bt_data[i].data, buffer, len);
+				test_bt_data[i++].len = len;
+			}
+
+			ck_assert_int_gt(write(sco_fds[0], buffer, len), 0);
+
+		}
+
+		if (pfds[1].revents & POLLIN) {
+			ck_assert_int_gt(read(pcm_mic_fds[0], buffer, sizeof(buffer)), 0);
+		}
+
+	}
+
+	ck_assert_int_eq(pthread_cancel(thread), 0);
+	ck_assert_int_eq(pthread_timedjoin(thread, NULL, 1e6), 0);
+
+	close(pcm_spk_fds[0]);
+	close(pcm_mic_fds[0]);
+	close(sco_fds[0]);
+}
+
+static int test_transport_acquire(struct ba_transport *t) {
+	debug("Acquire transport: %d", t->bt_fd);
+	return 0;
+}
+
+static int test_transport_release_bt_a2dp(struct ba_transport *t) {
+	free(t->bluez_dbus_owner); t->bluez_dbus_owner = NULL;
+	return transport_release_bt_a2dp(t);
 }
 
 START_TEST(test_a2dp_sbc) {
 
-	struct ba_transport transport = {
-		.codec = A2DP_CODEC_SBC,
-		.a2dp = {
-			.cconfig = (uint8_t *)&config_sbc_44100_stereo,
-			.cconfig_size = sizeof(config_sbc_44100_stereo),
-		},
-	};
+	struct ba_transport_type ttype = { .codec = A2DP_CODEC_SBC };
+	struct ba_transport *t = ba_transport_new_a2dp(device, ttype, ":test", "/path/sbc",
+			&config_sbc_44100_stereo, sizeof(config_sbc_44100_stereo));
 
-	transport.mtu_write = 153 * 3,
-	test_a2dp_encoding(&transport, io_thread_a2dp_source_sbc);
+	t->acquire = test_transport_acquire;
+	t->release = test_transport_release_bt_a2dp;
 
-	transport.mtu_read = transport.mtu_write;
-	test_a2dp_decoding(&transport, io_thread_a2dp_sink_sbc);
+	t->mtu_write = 153 * 3,
+	test_a2dp_encoding(t, io_thread_a2dp_source_sbc);
+
+	t->mtu_read = t->mtu_write;
+	test_a2dp_decoding(t, io_thread_a2dp_sink_sbc);
 
 } END_TEST
 
 #if ENABLE_AAC
 START_TEST(test_a2dp_aac) {
 
-	struct ba_transport transport = {
-		.codec = A2DP_CODEC_MPEG24,
-		.a2dp = {
-			.cconfig = (uint8_t *)&config_aac_44100_stereo,
-			.cconfig_size = sizeof(config_aac_44100_stereo),
-		},
-	};
+	struct ba_transport_type ttype = { .codec = A2DP_CODEC_MPEG24 };
+	struct ba_transport *t = ba_transport_new_a2dp(device, ttype, ":test", "/path/aac",
+			&config_aac_44100_stereo, sizeof(config_aac_44100_stereo));
 
-	transport.mtu_write = 64;
-	test_a2dp_encoding(&transport, io_thread_a2dp_source_aac);
+	t->acquire = test_transport_acquire;
+	t->release = test_transport_release_bt_a2dp;
 
-	transport.mtu_read = transport.mtu_write;
-	test_a2dp_decoding(&transport, io_thread_a2dp_sink_aac);
+	t->mtu_write = 64;
+	test_a2dp_encoding(t, io_thread_a2dp_source_aac);
+
+	t->mtu_read = t->mtu_write;
+	test_a2dp_decoding(t, io_thread_a2dp_sink_aac);
 
 } END_TEST
 #endif
@@ -199,16 +287,15 @@ START_TEST(test_a2dp_aac) {
 #if ENABLE_APTX
 START_TEST(test_a2dp_aptx) {
 
-	struct ba_transport transport = {
-		.codec = A2DP_CODEC_VENDOR_APTX,
-		.a2dp = {
-			.cconfig = (uint8_t *)&config_aptx_44100_stereo,
-			.cconfig_size = sizeof(config_aptx_44100_stereo),
-		},
-	};
+	struct ba_transport_type ttype = { .codec = A2DP_CODEC_VENDOR_APTX };
+	struct ba_transport *t = ba_transport_new_a2dp(device, ttype, ":test", "/path/aptx",
+			&config_aptx_44100_stereo, sizeof(config_aptx_44100_stereo));
 
-	transport.mtu_write = 40;
-	test_a2dp_encoding(&transport, io_thread_a2dp_source_aptx);
+	t->acquire = test_transport_acquire;
+	t->release = test_transport_release_bt_a2dp;
+
+	t->mtu_write = 40;
+	test_a2dp_encoding(t, io_thread_a2dp_source_aptx);
 
 } END_TEST
 #endif
@@ -216,22 +303,54 @@ START_TEST(test_a2dp_aptx) {
 #if ENABLE_LDAC
 START_TEST(test_a2dp_ldac) {
 
-	struct ba_transport transport = {
-		.profile = BLUETOOTH_PROFILE_A2DP_SOURCE,
-		.codec = A2DP_CODEC_VENDOR_LDAC,
-		.a2dp = {
-			.cconfig = (uint8_t *)&config_ldac_44100_stereo,
-			.cconfig_size = sizeof(config_ldac_44100_stereo),
-		},
-	};
+	struct ba_transport_type ttype = { .codec = A2DP_CODEC_VENDOR_LDAC };
+	struct ba_transport *t = ba_transport_new_a2dp(device, ttype, ":test", "/path/ldac",
+			&config_ldac_44100_stereo, sizeof(config_ldac_44100_stereo));
 
-	transport.mtu_write = RTP_HEADER_LEN + sizeof(rtp_media_header_t) + 679;
-	test_a2dp_encoding(&transport, io_thread_a2dp_source_ldac);
+	t->acquire = test_transport_acquire;
+	t->release = test_transport_release_bt_a2dp;
+
+	t->mtu_write = RTP_HEADER_LEN + sizeof(rtp_media_header_t) + 679;
+	test_a2dp_encoding(t, io_thread_a2dp_source_ldac);
+
+} END_TEST
+#endif
+
+START_TEST(test_sco_cvsd) {
+
+	struct ba_transport_type ttype = { .profile = BA_TRANSPORT_PROFILE_HSP_AG };
+	struct ba_transport *t = ba_transport_new_sco(device, ttype, ":test", "/path/sco/cvsd", NULL);
+
+	t->mtu_read = t->mtu_write = 48;
+	t->acquire = test_transport_acquire;
+
+	ba_transport_send_signal(t, TRANSPORT_PING);
+	test_sco(t, io_thread_sco);
+
+} END_TEST
+
+#if ENABLE_MSBC
+START_TEST(test_sco_msbc) {
+
+	struct ba_transport_type ttype = {
+		.profile = BA_TRANSPORT_PROFILE_HFP_AG,
+		.codec = HFP_CODEC_MSBC };
+	struct ba_transport *t = ba_transport_new_sco(device, ttype, ":test", "/path/sco/msbc", NULL);
+
+	t->mtu_read = t->mtu_write = 24;
+	t->acquire = test_transport_acquire;
+
+	ba_transport_send_signal(t, TRANSPORT_PING);
+	test_sco(t, io_thread_sco);
 
 } END_TEST
 #endif
 
 int main(void) {
+
+	bdaddr_t addr = {{ 1, 2, 3, 4, 5, 6 }};
+	adapter = ba_adapter_new(0);
+	device = ba_device_new(adapter, &addr);
 
 	Suite *s = suite_create(__FILE__);
 	TCase *tc = tcase_create(__FILE__);
@@ -251,6 +370,10 @@ int main(void) {
 	config.ldac_abr = true;
 	config.ldac_eqmid = LDACBT_EQMID_HQ;
 	tcase_add_test(tc, test_a2dp_ldac);
+#endif
+	tcase_add_test(tc, test_sco_cvsd);
+#if ENABLE_MSBC
+	tcase_add_test(tc, test_sco_msbc);
 #endif
 
 	srunner_run_all(sr, CK_ENV);

@@ -1,5 +1,5 @@
 # BlueALSA - Makefile.am
-# Copyright (c) 2016-2017 Arkadiusz Bokowy
+# Copyright (c) 2016-2019 Arkadiusz Bokowy
 
 EXTRA_DIST = 20-bluealsa.conf
 
@@ -8,11 +8,10 @@ asound_module_pcm_LTLIBRARIES = libasound_module_pcm_bluealsa.la
 asound_module_conf_DATA = 20-bluealsa.conf
 
 libasound_module_ctl_bluealsa_la_SOURCES = \
-	../shared/ctl-client.c \
-	../shared/log.c \
+	../shared/dbus-client.c \
 	bluealsa-ctl.c
 libasound_module_pcm_bluealsa_la_SOURCES = \
-	../shared/ctl-client.c \
+	../shared/dbus-client.c \
 	../shared/log.c \
 	../shared/rt.c \
 	bluealsa-pcm.c
@@ -24,13 +23,13 @@ asound_module_confdir = @ALSA_CONF_DIR@
 AM_CFLAGS = \
 	-I$(top_srcdir)/src \
 	@ALSA_CFLAGS@ \
-	@BLUEZ_CFLAGS@ \
-	@GLIB2_CFLAGS@
+	@DBUS1_CFLAGS@
 
 AM_LDFLAGS = -module -avoid-version
 
 libasound_module_ctl_bluealsa_la_LIBADD = \
-	@ALSA_LIBS@
+	@ALSA_LIBS@ \
+	@DBUS1_LIBS@
 libasound_module_pcm_bluealsa_la_LIBADD = \
 	@ALSA_LIBS@ \
-	@BLUEZ_LIBS@
+	@DBUS1_LIBS@
