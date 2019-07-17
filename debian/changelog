@@ -1,6 +1,6 @@
 bluealsa (0.11) buster; urgency=medium
 
-  * Merge in recent changes to original bluezalsa
+  * Merge in recent changes to original bluezalsa and JC patch for VLC
 
  -- Simon Long <simon@raspberrypi.org>  Thu, 04 Jul 2019 08:06:57 +0100
 
