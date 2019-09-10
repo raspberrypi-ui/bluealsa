@@ -33,7 +33,6 @@ const char *batostr_(const bdaddr_t *ba);
 
 int g_dbus_bluez_object_path_to_hci_dev_id(const char *path);
 bdaddr_t *g_dbus_bluez_object_path_to_bdaddr(const char *path, bdaddr_t *addr);
-struct ba_transport_type g_dbus_bluez_object_path_to_transport_type(const char *path);
 const char *g_dbus_transport_type_to_bluez_object_path(struct ba_transport_type type);
 
 GVariantIter *g_dbus_get_managed_objects(GDBusConnection *conn,
@@ -52,6 +51,11 @@ void snd_pcm_scale_s16le(int16_t *buffer, size_t size, int channels,
 
 const char *bluetooth_a2dp_codec_to_string(uint16_t codec);
 const char *ba_transport_type_to_string(struct ba_transport_type type);
+
+#if ENABLE_MP3LAME
+int a2dp_mpeg1_mp3_get_max_bitrate(uint16_t mask);
+const char *lame_encode_strerror(int err);
+#endif
 
 #if ENABLE_AAC
 #include <fdk-aac/aacdecoder_lib.h>

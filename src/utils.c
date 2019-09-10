@@ -28,6 +28,7 @@
 
 #include "a2dp-codecs.h"
 #include "hfp.h"
+#include "shared/defs.h"
 #include "shared/log.h"
 
 
@@ -158,70 +159,6 @@ bdaddr_t *g_dbus_bluez_object_path_to_bdaddr(const char *path, bdaddr_t *addr) {
 
 	free(tmp);
 	return addr;
-}
-
-/**
- * Extract transport type from the BlueZ D-Bus object path.
- *
- * @param path BlueZ D-Bus object path.
- * @return On success this function returns extracted transport type. */
-struct ba_transport_type g_dbus_bluez_object_path_to_transport_type(const char *path) {
-
-	struct ba_transport_type type = { 0, -1 };
-	const char *tmp;
-
-	if ((tmp = strstr(path, "/A2DP/")) != NULL) {
-		path = tmp;
-
-		if (strstr(path + 5, "/Source") != NULL)
-			type.profile = BA_TRANSPORT_PROFILE_A2DP_SOURCE;
-		else if (strstr(path + 5, "/Sink") != NULL)
-			type.profile = BA_TRANSPORT_PROFILE_A2DP_SINK;
-
-		if (strncmp(path + 5, "/SBC", 4) == 0)
-			type.codec = A2DP_CODEC_SBC;
-#if ENABLE_MPEG
-		else if (strncmp(path + 5, "/MPEG12", 7) == 0)
-			type.codec = A2DP_CODEC_MPEG12;
-#endif
-#if ENABLE_AAC
-		else if (strncmp(path + 5, "/MPEG24", 7) == 0)
-			type.codec = A2DP_CODEC_MPEG24;
-#endif
-#if ENABLE_APTX
-		else if (strncmp(path + 5, "/APTX", 5) == 0)
-			type.codec = A2DP_CODEC_VENDOR_APTX;
-#endif
-#if ENABLE_APTX_HD
-		else if (strncmp(path + 5, "/APTXHD", 7) == 0)
-			type.codec = A2DP_CODEC_VENDOR_APTX_HD;
-#endif
-#if ENABLE_LDAC
-		else if (strncmp(path + 5, "/LDAC", 5) == 0)
-			type.codec = A2DP_CODEC_VENDOR_LDAC;
-#endif
-
-	}
-
-	if ((tmp = strstr(path, "/HFP/")) != NULL) {
-		path = tmp;
-		if (strcmp(path + 4, "/HandsFree") == 0)
-			type.profile = BA_TRANSPORT_PROFILE_HFP_HF;
-		else if (strcmp(path + 4, "/AudioGateway") == 0)
-			type.profile = BA_TRANSPORT_PROFILE_HFP_AG;
-		type.codec = HFP_CODEC_UNDEFINED;
-	}
-
-	if ((tmp = strstr(path, "/HSP/")) != NULL) {
-		path = tmp;
-		if (strcmp(path + 4, "/Headset") == 0)
-			type.profile = BA_TRANSPORT_PROFILE_HSP_HS;
-		else if (strcmp(path + 4, "/AudioGateway") == 0)
-			type.profile = BA_TRANSPORT_PROFILE_HSP_AG;
-		type.codec = HFP_CODEC_CVSD;
-	}
-
-	return type;
 }
 
 /**
@@ -543,8 +480,9 @@ const char *ba_transport_type_to_string(struct ba_transport_type type) {
 		case A2DP_CODEC_VENDOR_LDAC:
 			return "A2DP Source (LDAC)";
 #endif
+		default:
+			return "A2DP Source";
 		}
-		return "A2DP Source";
 	case BA_TRANSPORT_PROFILE_A2DP_SINK:
 		switch (type.codec) {
 		case A2DP_CODEC_SBC:
@@ -569,12 +507,27 @@ const char *ba_transport_type_to_string(struct ba_transport_type type) {
 		case A2DP_CODEC_VENDOR_LDAC:
 			return "A2DP Sink (LDAC)";
 #endif
+		default:
+			return "A2DP Sink";
 		}
-		return "A2DP Sink";
 	case BA_TRANSPORT_PROFILE_HFP_HF:
-		return "HFP Hands-Free";
+		switch (type.codec) {
+		case HFP_CODEC_CVSD:
+			return "HFP Hands-Free (CVSD)";
+		case HFP_CODEC_MSBC:
+			return "HFP Hands-Free (mSBC)";
+		default:
+			return "HFP Hands-Free";
+		}
 	case BA_TRANSPORT_PROFILE_HFP_AG:
-		return "HFP Audio Gateway";
+		switch (type.codec) {
+		case HFP_CODEC_CVSD:
+			return "HFP Audio Gateway (CVSD)";
+		case HFP_CODEC_MSBC:
+			return "HFP Audio Gateway (mSBC)";
+		default:
+			return "HFP Audio Gateway";
+		}
 	case BA_TRANSPORT_PROFILE_HSP_HS:
 		return "HSP Headset";
 	case BA_TRANSPORT_PROFILE_HSP_AG:
@@ -592,11 +545,55 @@ const char *ba_transport_type_to_string(struct ba_transport_type type) {
 	return "N/A";
 }
 
+#if ENABLE_MP3LAME
+/**
+ * Get maximum possible bit-rate for the given bit-rate mask.
+ *
+ * @param mask MPEG-1 layer III bit-rate mask.
+ * @return Bit-rate in kilobits per second. */
+int a2dp_mpeg1_mp3_get_max_bitrate(uint16_t mask) {
+
+	static int bitrates[] = { 320, 256, 224, 192, 160, 128, 112, 96, 80, 64, 56, 48, 40, 32 };
+	size_t i = 0;
+
+	while (i < ARRAYSIZE(bitrates)) {
+		if (mask & (1 << (14 - i)))
+			return bitrates[i];
+		i++;
+	}
+
+	return -1;
+}
+#endif
+
+#if ENABLE_MP3LAME
+/**
+ * Get string representation of LAME error code.
+ *
+ * @param error LAME encoder error code.
+ * @return Human-readable string. */
+const char *lame_encode_strerror(int err) {
+	switch (err) {
+	case -1:
+		return "Too small output buffer";
+	case -2:
+		return "Out of memory";
+	case -3:
+		return "Params not initialized";
+	case -4:
+		return "Psycho acoustic error";
+	default:
+		debug("Unknown error code: %#x", err);
+		return "Unknown error";
+	}
+}
+#endif
+
 #if ENABLE_AAC
 /**
  * Get string representation of the FDK-AAC decoder error code.
  *
- * @param error FDK-AAC decoder error code.
+ * @param err FDK-AAC decoder error code.
  * @return Human-readable string. */
 const char *aacdec_strerror(AAC_DECODER_ERROR err) {
 	switch (err) {
@@ -673,7 +670,7 @@ const char *aacdec_strerror(AAC_DECODER_ERROR err) {
 /**
  * Get string representation of the FDK-AAC encoder error code.
  *
- * @param error FDK-AAC encoder error code.
+ * @param err FDK-AAC encoder error code.
  * @return Human-readable string. */
 const char *aacenc_strerror(AACENC_ERROR err) {
 	switch (err) {
@@ -712,7 +709,7 @@ const char *aacenc_strerror(AACENC_ERROR err) {
 /**
  * Get string representation of the LDAC error code.
  *
- * @param error LDAC error code.
+ * @param err LDAC error code.
  * @return Human-readable string. */
 const char *ldacBT_strerror(int err) {
 	switch (LDACBT_API_ERR(err)) {

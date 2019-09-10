@@ -53,18 +53,18 @@ static const struct bluez_a2dp_sampling_freq a2dp_sbc_samplings[] = {
 	{ 48000, SBC_SAMPLING_FREQ_48000 },
 };
 
-static const a2dp_mpeg_t a2dp_mpeg = {
+static const a2dp_mpeg_t a2dp_mpeg_source = {
 	.layer =
-		MPEG_LAYER_MP1 |
-		MPEG_LAYER_MP2 |
 		MPEG_LAYER_MP3,
 	.crc = 1,
 	.channel_mode =
+	/* NOTE: LAME does not support dual-channel mode. */
 		MPEG_CHANNEL_MODE_MONO |
-		MPEG_CHANNEL_MODE_DUAL_CHANNEL |
 		MPEG_CHANNEL_MODE_STEREO |
 		MPEG_CHANNEL_MODE_JOINT_STEREO,
-	.mpf = 1,
+	/* NOTE: Since MPF-2 is not required for neither Sink
+	 *       nor Source, we are not going to support it. */
+	.mpf = 0,
 	.frequency =
 		MPEG_SAMPLING_FREQ_16000 |
 		MPEG_SAMPLING_FREQ_22050 |
@@ -72,23 +72,71 @@ static const a2dp_mpeg_t a2dp_mpeg = {
 		MPEG_SAMPLING_FREQ_32000 |
 		MPEG_SAMPLING_FREQ_44100 |
 		MPEG_SAMPLING_FREQ_48000,
-	.bitrate =
-		MPEG_BIT_RATE_VBR |
-		MPEG_BIT_RATE_320000 |
-		MPEG_BIT_RATE_256000 |
-		MPEG_BIT_RATE_224000 |
-		MPEG_BIT_RATE_192000 |
-		MPEG_BIT_RATE_160000 |
-		MPEG_BIT_RATE_128000 |
-		MPEG_BIT_RATE_112000 |
-		MPEG_BIT_RATE_96000 |
-		MPEG_BIT_RATE_80000 |
-		MPEG_BIT_RATE_64000 |
-		MPEG_BIT_RATE_56000 |
-		MPEG_BIT_RATE_48000 |
-		MPEG_BIT_RATE_40000 |
-		MPEG_BIT_RATE_32000 |
-		MPEG_BIT_RATE_FREE,
+	.vbr = 1,
+	MPEG_INIT_BITRATE(
+		MPEG_BIT_RATE_INDEX_0 |
+		MPEG_BIT_RATE_INDEX_1 |
+		MPEG_BIT_RATE_INDEX_2 |
+		MPEG_BIT_RATE_INDEX_3 |
+		MPEG_BIT_RATE_INDEX_4 |
+		MPEG_BIT_RATE_INDEX_5 |
+		MPEG_BIT_RATE_INDEX_6 |
+		MPEG_BIT_RATE_INDEX_7 |
+		MPEG_BIT_RATE_INDEX_8 |
+		MPEG_BIT_RATE_INDEX_9 |
+		MPEG_BIT_RATE_INDEX_10 |
+		MPEG_BIT_RATE_INDEX_11 |
+		MPEG_BIT_RATE_INDEX_12 |
+		MPEG_BIT_RATE_INDEX_13 |
+		MPEG_BIT_RATE_INDEX_14
+	)
+};
+
+static const a2dp_mpeg_t a2dp_mpeg_sink = {
+	.layer =
+#if ENABLE_MPG123
+		MPEG_LAYER_MP1 |
+		MPEG_LAYER_MP2 |
+#endif
+		MPEG_LAYER_MP3,
+	.crc = 1,
+	.channel_mode =
+	/* NOTE: LAME does not support dual-channel mode. Be aware, that
+	 *       lack of this feature violates A2DP Sink specification. */
+		MPEG_CHANNEL_MODE_MONO |
+#if ENABLE_MPG123
+		MPEG_CHANNEL_MODE_DUAL_CHANNEL |
+#endif
+		MPEG_CHANNEL_MODE_STEREO |
+		MPEG_CHANNEL_MODE_JOINT_STEREO,
+	/* NOTE: Since MPF-2 is not required for neither Sink
+	 *       nor Source, we are not going to support it. */
+	.mpf = 0,
+	.frequency =
+		MPEG_SAMPLING_FREQ_16000 |
+		MPEG_SAMPLING_FREQ_22050 |
+		MPEG_SAMPLING_FREQ_24000 |
+		MPEG_SAMPLING_FREQ_32000 |
+		MPEG_SAMPLING_FREQ_44100 |
+		MPEG_SAMPLING_FREQ_48000,
+	.vbr = 1,
+	MPEG_INIT_BITRATE(
+		MPEG_BIT_RATE_INDEX_0 |
+		MPEG_BIT_RATE_INDEX_1 |
+		MPEG_BIT_RATE_INDEX_2 |
+		MPEG_BIT_RATE_INDEX_3 |
+		MPEG_BIT_RATE_INDEX_4 |
+		MPEG_BIT_RATE_INDEX_5 |
+		MPEG_BIT_RATE_INDEX_6 |
+		MPEG_BIT_RATE_INDEX_7 |
+		MPEG_BIT_RATE_INDEX_8 |
+		MPEG_BIT_RATE_INDEX_9 |
+		MPEG_BIT_RATE_INDEX_10 |
+		MPEG_BIT_RATE_INDEX_11 |
+		MPEG_BIT_RATE_INDEX_12 |
+		MPEG_BIT_RATE_INDEX_13 |
+		MPEG_BIT_RATE_INDEX_14
+	)
 };
 
 static const struct bluez_a2dp_channel_mode a2dp_mpeg_channels[] = {
@@ -154,8 +202,7 @@ static const struct bluez_a2dp_sampling_freq a2dp_aac_samplings[] = {
 };
 
 static const a2dp_aptx_t a2dp_aptx = {
-	.info.vendor_id = APTX_VENDOR_ID,
-	.info.codec_id = APTX_CODEC_ID,
+	.info = A2DP_SET_VENDOR_ID_CODEC_ID(APTX_VENDOR_ID, APTX_CODEC_ID),
 	.channel_mode =
 		/* NOTE: Used apt-X library does not support
 		 *       single channel (mono) mode. */
@@ -179,11 +226,10 @@ static const struct bluez_a2dp_sampling_freq a2dp_aptx_samplings[] = {
 };
 
 static const a2dp_ldac_t a2dp_ldac = {
-	.info.vendor_id = LDAC_VENDOR_ID,
-	.info.codec_id = LDAC_CODEC_ID,
+	.info = A2DP_SET_VENDOR_ID_CODEC_ID(LDAC_VENDOR_ID, LDAC_CODEC_ID),
 	.channel_mode =
 		LDAC_CHANNEL_MODE_MONO |
-		LDAC_CHANNEL_MODE_DUAL_CHANNEL |
+		LDAC_CHANNEL_MODE_DUAL |
 		LDAC_CHANNEL_MODE_STEREO,
 	.frequency =
 		/* NOTE: Used LDAC library does not support
@@ -196,7 +242,7 @@ static const a2dp_ldac_t a2dp_ldac = {
 
 static const struct bluez_a2dp_channel_mode a2dp_ldac_channels[] = {
 	{ BLUEZ_A2DP_CHM_MONO, LDAC_CHANNEL_MODE_MONO },
-	{ BLUEZ_A2DP_CHM_DUAL_CHANNEL, LDAC_CHANNEL_MODE_DUAL_CHANNEL },
+	{ BLUEZ_A2DP_CHM_DUAL_CHANNEL, LDAC_CHANNEL_MODE_DUAL },
 	{ BLUEZ_A2DP_CHM_STEREO, LDAC_CHANNEL_MODE_STEREO },
 };
 
@@ -232,8 +278,8 @@ static const struct bluez_a2dp_codec a2dp_codec_sink_sbc = {
 static const struct bluez_a2dp_codec a2dp_codec_source_mpeg = {
 	.dir = BLUEZ_A2DP_SOURCE,
 	.id = A2DP_CODEC_MPEG12,
-	.cfg = &a2dp_mpeg,
-	.cfg_size = sizeof(a2dp_mpeg),
+	.cfg = &a2dp_mpeg_source,
+	.cfg_size = sizeof(a2dp_mpeg_source),
 	.channels = a2dp_mpeg_channels,
 	.channels_size = ARRAYSIZE(a2dp_mpeg_channels),
 	.samplings = a2dp_mpeg_samplings,
@@ -243,8 +289,8 @@ static const struct bluez_a2dp_codec a2dp_codec_source_mpeg = {
 static const struct bluez_a2dp_codec a2dp_codec_sink_mpeg = {
 	.dir = BLUEZ_A2DP_SINK,
 	.id = A2DP_CODEC_MPEG12,
-	.cfg = &a2dp_mpeg,
-	.cfg_size = sizeof(a2dp_mpeg),
+	.cfg = &a2dp_mpeg_sink,
+	.cfg_size = sizeof(a2dp_mpeg_sink),
 	.channels = a2dp_mpeg_channels,
 	.channels_size = ARRAYSIZE(a2dp_mpeg_channels),
 	.samplings = a2dp_mpeg_samplings,
@@ -329,8 +375,12 @@ static const struct bluez_a2dp_codec *a2dp_codecs[] = {
 	&a2dp_codec_sink_aac,
 #endif
 #if ENABLE_MPEG
+# if ENABLE_MP3LAME
 	&a2dp_codec_source_mpeg,
+# endif
+# if ENABLE_MP3LAME || ENABLE_MPG123
 	&a2dp_codec_sink_mpeg,
+# endif
 #endif
 	&a2dp_codec_source_sbc,
 	&a2dp_codec_sink_sbc,

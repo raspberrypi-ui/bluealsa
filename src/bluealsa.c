@@ -48,20 +48,12 @@ struct ba_config config = {
 		HFP_HF_FEAT_VOLUME |
 		HFP_HF_FEAT_ECS |
 		HFP_HF_FEAT_ECC |
-#if ENABLE_MSBC
-		HFP_HF_FEAT_CODEC |
-		HFP_HF_FEAT_ESOC |
-#endif
 		0,
 	.hfp.features_rfcomm_ag =
 		HFP_AG_FEAT_REJECT |
 		HFP_AG_FEAT_ECS |
 		HFP_AG_FEAT_ECC |
 		HFP_AG_FEAT_EERC |
-#if ENABLE_MSBC
-		HFP_AG_FEAT_CODEC |
-		HFP_AG_FEAT_ESOC |
-#endif
 		0,
 
 	.a2dp.volume = false,
@@ -75,6 +67,12 @@ struct ba_config config = {
 	 * not enable afterburner by default. */
 	.aac_afterburner = false,
 	.aac_vbr_mode = 4,
+#endif
+
+#if ENABLE_MP3LAME
+	.lame_quality = 5,
+	/* Use high quality for VBR mode (~190 kbps) as a default. */
+	.lame_vbr_quality = 2,
 #endif
 
 #if ENABLE_LDAC

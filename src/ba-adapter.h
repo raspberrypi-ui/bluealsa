@@ -19,11 +19,14 @@
 
 #include <glib.h>
 
+#include <bluetooth/bluetooth.h>
+#include <bluetooth/hci.h>
+
 /* Data associated with BT adapter. */
 struct ba_adapter {
 
-	int hci_dev_id;
-	char hci_name[8];
+	/* basic info about HCI device */
+	struct hci_dev_info hci;
 
 	/* data for D-Bus management */
 	char ba_dbus_path[32];
@@ -43,5 +46,13 @@ struct ba_adapter *ba_adapter_lookup(int dev_id);
 struct ba_adapter *ba_adapter_ref(struct ba_adapter *a);
 void ba_adapter_destroy(struct ba_adapter *a);
 void ba_adapter_unref(struct ba_adapter *a);
+
+/**
+ * Macro for testing whether eSCO is supported. */
+#define BA_TEST_ESCO_SUPPORT(a) \
+	((a)->hci.features[2] & LMP_TRSP_SCO && (a)->hci.features[3] & LMP_ESCO)
+
+int ba_adapter_get_hfp_features_hf(struct ba_adapter *a);
+int ba_adapter_get_hfp_features_ag(struct ba_adapter *a);
 
 #endif

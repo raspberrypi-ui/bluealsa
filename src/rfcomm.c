@@ -286,12 +286,12 @@ static int rfcomm_handler_brsf_set_cb(struct rfcomm_conn *c, const struct bt_at 
 
 	t->rfcomm.hfp_features = atoi(at->value);
 
-	/* Codec negotiation is not supported in the HF, hence no
-	 * wideband audio support. AT+BAC will not be sent. */
+	/* If codec negotiation is not supported in the HF, the AT+BAC
+	 * command will not be sent. So, we can assume default codec. */
 	if (!(t->rfcomm.hfp_features & HFP_HF_FEAT_CODEC))
 		t->rfcomm.sco->type.codec = HFP_CODEC_CVSD;
 
-	sprintf(tmp, "%u", config.hfp.features_rfcomm_ag);
+	sprintf(tmp, "%u", ba_adapter_get_hfp_features_ag(t->d->a));
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, "+BRSF", tmp) == -1)
 		return -1;
 	if (rfcomm_write_at(fd, AT_TYPE_RESP, NULL, "OK") == -1)
@@ -576,7 +576,6 @@ void *rfcomm_thread(void *arg) {
 	struct ba_transport *t = (struct ba_transport *)arg;
 
 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-	pthread_setname_np(pthread_self(), "ba-rfcomm");
 	pthread_cleanup_push(PTHREAD_CLEANUP(ba_transport_pthread_cleanup), t);
 
 	/* initialize structure used for synchronization */
@@ -628,7 +627,7 @@ void *rfcomm_thread(void *arg) {
 			if (t->type.profile & BA_TRANSPORT_PROFILE_HFP_HF)
 				switch (conn.state) {
 				case HFP_DISCONNECTED:
-					sprintf(tmp, "%u", config.hfp.features_rfcomm_hf);
+					sprintf(tmp, "%u", ba_adapter_get_hfp_features_hf(t->d->a));
 					if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_SET, "+BRSF", tmp) == -1)
 						goto ioerror;
 					conn.handler = &rfcomm_handler_brsf_resp;
@@ -640,7 +639,8 @@ void *rfcomm_thread(void *arg) {
 					if (t->rfcomm.hfp_features & HFP_AG_FEAT_CODEC) {
 #if ENABLE_MSBC
 						/* advertise, that we are supporting CVSD (1) and mSBC (2) */
-						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_SET, "+BAC", "1,2") == -1)
+						const char *value = BA_TEST_ESCO_SUPPORT(t->d->a) ? "1,2" : "1";
+						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_SET, "+BAC", value) == -1)
 #else
 						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_CMD_SET, "+BAC", "1") == -1)
 #endif
@@ -704,19 +704,16 @@ void *rfcomm_thread(void *arg) {
 					rfcomm_set_hfp_state(&conn, HFP_SLC_CONNECTED);
 					/* fall-through */
 				case HFP_SLC_CONNECTED:
-					if (t->rfcomm.hfp_features & HFP_HF_FEAT_CODEC) {
 #if ENABLE_MSBC
+					if (BA_TEST_ESCO_SUPPORT(t->d->a) &&
+							t->rfcomm.hfp_features & HFP_HF_FEAT_CODEC) {
 						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RESP, "+BCS", conn.msbc ? "2" : "1") == -1)
 							goto ioerror;
 						t->rfcomm.sco->type.codec = conn.msbc ? HFP_CODEC_MSBC : HFP_CODEC_CVSD;
-#else
-						if (rfcomm_write_at(pfds[1].fd, AT_TYPE_RESP, "+BCS", "1") == -1)
-							goto ioerror;
-						t->rfcomm.sco->type.codec = HFP_CODEC_CVSD;
-#endif
 						conn.handler = &rfcomm_handler_bcs_set;
 						break;
 					}
+#endif
 					/* fall-through */
 				case HFP_CC_BCS_SET:
 				case HFP_CC_BCS_SET_OK:
@@ -757,12 +754,7 @@ void *rfcomm_thread(void *arg) {
 
 		if (pfds[0].revents & POLLIN) {
 			/* dispatch incoming event */
-
-			enum ba_transport_signal sig = -1;
-			if (read(pfds[0].fd, &sig, sizeof(sig)) != sizeof(sig))
-				warn("Couldn't read signal: %s", strerror(errno));
-
-			switch (sig) {
+			switch (ba_transport_recv_signal(t)) {
 			case TRANSPORT_SET_VOLUME:
 				if (conn.mic_gain != t->rfcomm.sco->sco.mic_gain) {
 					int gain = conn.mic_gain = t->rfcomm.sco->sco.mic_gain;
@@ -782,7 +774,6 @@ void *rfcomm_thread(void *arg) {
 			default:
 				break;
 			}
-
 		}
 
 		if (pfds[1].revents & POLLIN) {

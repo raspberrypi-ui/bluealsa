@@ -35,12 +35,12 @@ START_TEST(test_ba_adapter) {
 	struct ba_adapter *a;
 
 	ck_assert_ptr_ne(a = ba_adapter_new(0), NULL);
-	ck_assert_str_eq(a->hci_name, "hci0");
+	ck_assert_str_eq(a->hci.name, "hci0");
 	ba_adapter_unref(a);
 
 	ck_assert_ptr_ne(a = ba_adapter_new(5), NULL);
-	ck_assert_int_eq(a->hci_dev_id, 5);
-	ck_assert_str_eq(a->hci_name, "hci5");
+	ck_assert_int_eq(a->hci.dev_id, 5);
+	ck_assert_str_eq(a->hci.name, "hci5");
 	ba_adapter_unref(a);
 
 } END_TEST
@@ -137,6 +137,10 @@ START_TEST(test_ba_transport_volume_packed) {
 
 } END_TEST
 
+static int test_cascade_free_transport_unref(struct ba_transport *t) {
+	return ba_transport_unref(t), 0;
+}
+
 START_TEST(test_cascade_free) {
 
 	struct ba_adapter *a;
@@ -148,7 +152,7 @@ START_TEST(test_cascade_free) {
 	ck_assert_ptr_ne(a = ba_adapter_new(0), NULL);
 	ck_assert_ptr_ne(d = ba_device_new(a, &addr), NULL);
 	ck_assert_ptr_ne(t = ba_transport_new(d, type, "/owner", "/path"), NULL);
-	t->release = ba_transport_unref;
+	t->release = test_cascade_free_transport_unref;
 
 	ba_device_unref(d);
 	ba_adapter_destroy(a);

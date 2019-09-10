@@ -186,6 +186,15 @@ struct ba_transport *ba_transport_new_sco(
 	if (type.profile & BA_TRANSPORT_PROFILE_MASK_HSP)
 		type.codec = HFP_CODEC_CVSD;
 
+#if ENABLE_MSBC
+	/* Check whether support for codec other than
+	 * CVSD is possible with underlying adapter. */
+	if (!BA_TEST_ESCO_SUPPORT(device->a))
+		type.codec = HFP_CODEC_CVSD;
+#else
+	type.codec = HFP_CODEC_CVSD;
+#endif
+
 	if ((t = ba_transport_new(device, type, dbus_owner, dbus_path)) == NULL)
 		return NULL;
 
@@ -316,6 +325,23 @@ int ba_transport_send_signal(struct ba_transport *t, enum ba_transport_signal si
 	return write(t->sig_fd[1], &sig, sizeof(sig));
 }
 
+enum ba_transport_signal ba_transport_recv_signal(struct ba_transport *t) {
+
+	enum ba_transport_signal sig;
+	ssize_t ret;
+
+	while ((ret = read(t->sig_fd[0], &sig, sizeof(sig))) == -1 &&
+			errno == EINTR)
+		continue;
+
+	if (ret != sizeof(sig)) {
+		warn("Couldn't read transport signal: %s", strerror(errno));
+		return TRANSPORT_PING;
+	}
+
+	return sig;
+}
+
 unsigned int ba_transport_get_channels(const struct ba_transport *t) {
 
 	if (t->type.profile & BA_TRANSPORT_PROFILE_MASK_A2DP)
@@ -368,7 +394,7 @@ unsigned int ba_transport_get_channels(const struct ba_transport *t) {
 			case LDAC_CHANNEL_MODE_MONO:
 				return 1;
 			case LDAC_CHANNEL_MODE_STEREO:
-			case LDAC_CHANNEL_MODE_DUAL_CHANNEL:
+			case LDAC_CHANNEL_MODE_DUAL:
 				return 2;
 			}
 			break;
@@ -798,7 +824,7 @@ static int transport_acquire_bt_sco(struct ba_transport *t) {
 	if (t->bt_fd != -1)
 		return t->bt_fd;
 
-	if (hci_devinfo(t->d->a->hci_dev_id, &di) == -1) {
+	if (hci_devinfo(t->d->a->hci.dev_id, &di) == -1) {
 		error("Couldn't get HCI device info: %s", strerror(errno));
 		return -1;
 	}
