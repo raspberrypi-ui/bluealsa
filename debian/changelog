@@ -1,3 +1,9 @@
+bluealsa (0.13) buster; urgency=medium
+
+  * Merge in recent changes to bluezalsa
+
+ -- Simon Long <simon@raspberrypi.org>  Fri, 13 Sep 2019 13:24:42 +0100
+
 bluealsa (0.12) buster; urgency=medium
 
   * libdbus-1-dev added as a build dependency - no code changes
